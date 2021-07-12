@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-
 	"github.com/pingcap-incubator/tinykv/kv/coprocessor"
 	"github.com/pingcap-incubator/tinykv/kv/storage"
 	"github.com/pingcap-incubator/tinykv/kv/storage/raft_storage"
@@ -63,13 +62,36 @@ func (server *Server) RawPut(_ context.Context, req *kvrpcpb.RawPutRequest) (*kv
 }
 
 func (server *Server) RawDelete(_ context.Context, req *kvrpcpb.RawDeleteRequest) (*kvrpcpb.RawDeleteResponse, error) {
-	// Your Code Here (1).
-	return nil, nil
+	modify := []storage.Modify{{
+		Data: storage.Put{Cf: req.Cf, Key: req.Key},
+	}}
+	err := server.storage.Write(req.Context, modify)
+	if err != nil {
+		return nil, err
+	}
+	return &kvrpcpb.RawDeleteResponse{}, nil
 }
 
 func (server *Server) RawScan(_ context.Context, req *kvrpcpb.RawScanRequest) (*kvrpcpb.RawScanResponse, error) {
-	// Your Code Here (1).
-	return nil, nil
+	reader, err := server.storage.Reader(req.Context)
+	if err != nil {
+		return nil, err
+	}
+	iter := reader.IterCF(req.Cf)
+	defer iter.Close()
+	iter.Seek(req.StartKey)
+	var kvPairs []*kvrpcpb.KvPair
+	count := uint32(0)
+	for iter.Valid() && count < req.Limit{
+		key:= iter.Item().Key()
+		value, _:= iter.Item().Value()
+		if len(value) != 0{
+			kvPairs = append(kvPairs, &kvrpcpb.KvPair{Key: key, Value: value})
+			count++
+		}
+		iter.Next()
+	}
+	return &kvrpcpb.RawScanResponse{Kvs: kvPairs}, nil
 }
 
 // Raft commands (tinykv <-> tinykv)

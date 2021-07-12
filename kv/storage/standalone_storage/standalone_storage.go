@@ -14,15 +14,12 @@ type StandAloneStorage struct {
 	KPath string
 	VPath string
 	db *badger.DB
-	Iter *engine_util.BadgerIterator
-	txn *badger.Txn
 	// Your Data Here (1).
 }
 
-type StorageReader struct {
-	GetCF func(cf string, key []byte) ([]byte, error)
-	IterCF func(cf string) engine_util.DBIterator
-	Close func()
+type StandAloneStorageReader struct {
+	storage *StandAloneStorage
+	txn *badger.Txn
 }
 
 func NewStandAloneStorage(conf *config.Config) *StandAloneStorage {
@@ -45,31 +42,40 @@ func (s *StandAloneStorage) Stop() error {
 	return err
 }
 
-func (s *StandAloneStorage) GetCF(cf string, key []byte) ([]byte, error) {
-	return engine_util.GetCF(s.db, cf, key)
+func (reader *StandAloneStorageReader) GetCF(cf string, key []byte) ([]byte, error) {
+	return engine_util.GetCF(reader.storage.db, cf, key)
 }
 
-func (s *StandAloneStorage) IterCF(cf string) engine_util.DBIterator{
-	txn := &badger.Txn{}
-	s.txn = txn
-	s.Iter = engine_util.NewCFIterator(cf, txn)
-	return s.Iter
+func (reader *StandAloneStorageReader) IterCF(cf string) engine_util.DBIterator{
+	txn := reader.storage.db.NewTransaction(true)
+	reader.txn = txn
+	return engine_util.NewCFIterator(cf, txn)
 }
 
-func (s *StandAloneStorage) Close() {
-	s.txn.Discard()
-	s.Iter.Close()
+func (reader *StandAloneStorageReader) Close() {
+	reader.txn.Discard()
 }
 
 func (s *StandAloneStorage) Reader(ctx *kvrpcpb.Context) (storage.StorageReader, error) {
-	return s, nil
+	return &StandAloneStorageReader{storage: s}, nil
 }
 
 func (s *StandAloneStorage) Write(ctx *kvrpcpb.Context, batch []storage.Modify) error {
 	for _, v := range batch {
-		err := engine_util.PutCF(s.db, v.Cf(), v.Key(), v.Value())
-		if err != nil{
-			return err
+		if v.Value() != nil {
+			err := engine_util.PutCF(s.db, v.Cf(), v.Key(), v.Value())
+			if err != nil{
+				return err
+			}
+		}else{
+			err := engine_util.DeleteCF(s.db, v.Cf(), v.Key())
+			if err != nil{
+				return err
+			}
+			err = engine_util.PutCF(s.db, v.Cf(), v.Key(), v.Value())
+			if err != nil{
+				return err
+			}
 		}
 	}
 	return nil
