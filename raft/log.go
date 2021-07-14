@@ -48,7 +48,6 @@ type RaftLog struct {
 	// the incoming unstable snapshot, if any.
 	// (Used in 2C)
 	pendingSnapshot *pb.Snapshot
-
 	// Your Data Here (2A).
 }
 
@@ -56,7 +55,16 @@ type RaftLog struct {
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
 	// Your Code Here (2A).
-	return nil
+	lastIndex, _ := storage.LastIndex()
+	firstIndex, _ := storage.FirstIndex()
+	entries, _ := storage.Entries(firstIndex, lastIndex + 1)
+	return &RaftLog{
+		storage: storage,
+		committed: lastIndex,
+		applied: lastIndex,
+		stabled: lastIndex,
+		entries: entries,
+	}
 }
 
 // We need to compact the log entries in some point of time like
