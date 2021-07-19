@@ -69,13 +69,15 @@ type Ready struct {
 // RawNode is a wrapper of Raft.
 type RawNode struct {
 	Raft *Raft
-	// Your Data Here (2A).
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
-	// Your Code Here (2A).
-	return nil, nil
+	rawNode := newRaft(config)
+	if rawNode == nil {
+		return nil, errors.New("not a vaild config")
+	}
+	return &RawNode{rawNode}, nil
 }
 
 // Tick advances the internal logical clock by a single tick.

@@ -738,7 +738,7 @@ func TestLeaderSyncFollowerLog2AB(t *testing.T) {
 		follower.Term = term - 1
 		// It is necessary to have a three-node cluster.
 		// The second may have more up-to-date log than the first one, so the
-		// first node needs the vote from the third node to become the leader.
+		// first node dneeds the vote from the third node to become the leader.
 		n := newNetwork(lead, follower, nopStepper)
 		n.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 		// The election occurs in the term after the one we loaded with
