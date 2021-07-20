@@ -127,7 +127,7 @@ func (l *RaftLog) LastIndex() uint64 {
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
-	if i > l.LastIndex() {
+	if i > l.LastIndex() || i < l.offset {
 		return 0, errors.New("read uninitialized address buffer")
 	}
 	return l.entries[i - l.offset].Term, nil
