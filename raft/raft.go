@@ -180,21 +180,16 @@ func newRaft(c *Config) *Raft {
 			Next: raftLog.LastIndex() + 1 , // replicant be expected to receive entry index
 		}
 	}
-	hardState, _, err := raftLog.storage.InitialState()
-	if err != nil {
-		return nil
-	}
-	raftLog.committed = hardState.Commit
  	return &Raft{
 		id: c.ID,
 		State: StateFollower,
 		electionBaseline: c.ElectionTick,
 		electionTimeout: randomizedTimeout(c.ElectionTick),
 		heartbeatTimeout: c.HeartbeatTick,
-		Term: hardState.Term,
+		Term: 0,
 		Prs: prs,
 		votes: make(map[uint64]bool),
-		Vote: hardState.Vote,
+		Vote: None,
 		RaftLog: raftLog,
 	}
 }
@@ -485,12 +480,11 @@ func (r *Raft) handleBeat(){
 func (r *Raft) handleRequestVote(m pb.Message){
 	logTerm := uint64(0)
 	if r.RaftLog.LastIndex() != 0 {
-		logTerm = r.RaftLog.at(r.RaftLog.LastIndex()).Term
+		logTerm = r.RaftLog.at(r.RaftLog.committed).Term
 	}
-	reject := 	m.Term < r.Term ||
-				m.Term == r.Term && r.Vote != m.From && r.Vote != None ||
+	reject := 	m.Term <= r.Term ||
 				logTerm > m.LogTerm ||
-				logTerm == m.LogTerm && r.RaftLog.LastIndex() > m.Index
+				logTerm == m.LogTerm && r.RaftLog.committed > m.Index
 	if m.Term > r.Term {
 		r.becomeFollower(m.Term, None)
 		if !reject {
