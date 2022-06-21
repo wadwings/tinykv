@@ -155,9 +155,9 @@ func (rn *RawNode) Ready() Ready {
 	}else {
 		softState = nil
 	}
-	prehardState, _, _ := rn.Raft.RaftLog.storage.InitialState()
+	preHardState, _, _ := rn.Raft.RaftLog.storage.InitialState()
 	var hardState pb.HardState
-	if rn.Raft.Term != storageLastTerm || rn.Raft.RaftLog.committed != prehardState.Commit {
+	if rn.Raft.Term != storageLastTerm || rn.Raft.RaftLog.committed != preHardState.Commit {
 		hardState = pb.HardState{
 			Term:                 rn.Raft.Term,
 			Vote:                 rn.Raft.Vote,
@@ -176,6 +176,9 @@ func (rn *RawNode) Ready() Ready {
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
+	if len(rn.Raft.RaftLog.unstableEntries()) != 0 || len(rn.Raft.RaftLog.nextEnts()) != 0 {
+		return true
+	}
 	// Your Code Here (2A).
 	return false
 }

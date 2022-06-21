@@ -2,6 +2,7 @@ package raftstore
 
 import (
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/raft"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -42,6 +43,21 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	if d.stopped {
 		return
 	}
+	var ready raft.Ready
+	if d.RaftGroup.HasReady() {
+		ready = d.RaftGroup.Ready()
+	}
+	_, _ = d.peerStorage.SaveReadyState(&ready)
+	for _, msg := range ready.Messages{
+		_ = d.ctx.trans.Send(&rspb.RaftMessage{
+			RegionId: d.regionId,
+			FromPeer: d.peerCache[msg.From],
+			ToPeer: d.peerCache[msg.To],
+			Message: &msg,
+		})
+	}
+	d.peerStorage
+
 	// Your Code Here (2B).
 }
 
@@ -112,6 +128,13 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	if err != nil {
 		cb.Done(ErrResp(err))
 		return
+	}
+	for _, request := range msg.Requests{
+		switch request.CmdType {
+		case raft_cmdpb.CmdType_Get: {
+			d.
+		}
+		}
 	}
 	// Your Code Here (2B).
 }
