@@ -48,15 +48,14 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		ready = d.RaftGroup.Ready()
 	}
 	_, _ = d.peerStorage.SaveReadyState(&ready)
-	for _, msg := range ready.Messages{
+	for _, msg := range ready.Messages {
 		_ = d.ctx.trans.Send(&rspb.RaftMessage{
 			RegionId: d.regionId,
 			FromPeer: d.peerCache[msg.From],
-			ToPeer: d.peerCache[msg.To],
-			Message: &msg,
+			ToPeer:   d.peerCache[msg.To],
+			Message:  &msg,
 		})
 	}
-	d.peerStorage
 
 	// Your Code Here (2B).
 }
@@ -129,11 +128,12 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		cb.Done(ErrResp(err))
 		return
 	}
-	for _, request := range msg.Requests{
+	for _, request := range msg.Requests {
 		switch request.CmdType {
-		case raft_cmdpb.CmdType_Get: {
-			d.
-		}
+		case raft_cmdpb.CmdType_Get:
+			{
+				//d.
+			}
 		}
 	}
 	// Your Code Here (2B).
