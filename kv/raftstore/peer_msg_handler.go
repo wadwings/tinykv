@@ -2,7 +2,7 @@ package raftstore
 
 import (
 	"fmt"
-	"github.com/pingcap-incubator/tinykv/raft"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -40,14 +40,13 @@ func newPeerMsgHandler(peer *peer, ctx *GlobalContext) *peerMsgHandler {
 }
 
 func (d *peerMsgHandler) HandleRaftReady() {
-	if d.stopped {
+	if d.stopped || !d.RaftGroup.HasReady() {
 		return
 	}
-	var ready raft.Ready
-	if d.RaftGroup.HasReady() {
-		ready = d.RaftGroup.Ready()
+	ready := d.RaftGroup.Ready()
+	if _, err := d.peerStorage.SaveReadyState(&ready); err != nil {
+		return
 	}
-	_, _ = d.peerStorage.SaveReadyState(&ready)
 	for _, msg := range ready.Messages {
 		_ = d.ctx.trans.Send(&rspb.RaftMessage{
 			RegionId: d.regionId,
@@ -128,14 +127,34 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		cb.Done(ErrResp(err))
 		return
 	}
+	var msgs []eraftpb.Message
 	for _, request := range msg.Requests {
 		switch request.CmdType {
 		case raft_cmdpb.CmdType_Get:
 			{
-				//d.
+			}
+		case raft_cmdpb.CmdType_Put:
+			{
+				str, _ := request.Marshal()
+				msgs = append(msgs, eraftpb.Message{
+					MsgType: eraftpb.MessageType_MsgPropose,
+					To:      d.LeaderId(),
+					Entries: []*eraftpb.Entry{{Data: str}},
+				})
+			}
+		case raft_cmdpb.CmdType_Delete:
+			{
+				str, _ := request.Marshal()
+				msgs = append(msgs, eraftpb.Message{
+					MsgType: eraftpb.MessageType_MsgPropose,
+					To:      d.LeaderId(),
+					Entries: []*eraftpb.Entry{{Data: str}},
+				})
 			}
 		}
 	}
+	d.Send(d.ctx.trans, msgs)
+
 	// Your Code Here (2B).
 }
 
