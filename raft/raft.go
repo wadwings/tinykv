@@ -16,7 +16,6 @@ package raft
 
 import (
 	"errors"
-	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"math/rand"
 )
@@ -180,7 +179,6 @@ func newRaft(c *Config) *Raft {
 			Next:  raftLog.LastIndex() + 1, // replicant be expected to receive entry index
 		}
 	}
-
 	hardState, _, err := c.Storage.InitialState()
 	if err != nil {
 		return nil
@@ -209,14 +207,10 @@ func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
 	if r.State == StateLeader {
 		var entries []*pb.Entry
-		logTerm := uint64(0)
-		index := uint64(0)
+		logTerm, _ := r.RaftLog.Term(r.Prs[to].Match)
+		index := r.Prs[to].Match
 		for i := r.Prs[to].Match + 1; i < r.Prs[to].Next; i++ {
 			entries = append(entries, r.RaftLog.at(i))
-		}
-		if len(r.RaftLog.entries)-1-len(entries) >= 0 {
-			logTerm = r.RaftLog.entries[len(r.RaftLog.entries)-1-len(entries)].Term
-			index = r.RaftLog.entries[len(r.RaftLog.entries)-1-len(entries)].Index
 		}
 		r.msgs = append(r.msgs, pb.Message{
 			MsgType:              pb.MessageType_MsgAppend,
@@ -262,10 +256,7 @@ func (r *Raft) sendHeartbeat(to uint64) {
 
 func (r *Raft) sendVote(to uint64) {
 	if r.State == StateCandidate {
-		logTerm := uint64(0)
-		if r.RaftLog.LastIndex() != 0 {
-			logTerm, _ = r.RaftLog.Term(r.RaftLog.LastIndex())
-		}
+		logTerm, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
 		r.msgs = append(r.msgs, pb.Message{
 			MsgType:              pb.MessageType_MsgRequestVote,
 			To:                   to,
@@ -281,10 +272,12 @@ func (r *Raft) sendVote(to uint64) {
 			XXX_unrecognized:     nil,
 			XXX_sizecache:        0,
 		})
+		//log.Infof("%+v", r.msgs)
 	}
 }
 
 func (r *Raft) bcastMsg(msgType pb.MessageType) {
+	//log.Infof("%v broadcast Msg, %+v", r.id, msgType)
 	for key := range r.Prs {
 		if key == r.id {
 			continue
@@ -293,6 +286,7 @@ func (r *Raft) bcastMsg(msgType pb.MessageType) {
 		case pb.MessageType_MsgHeartbeat:
 			r.sendHeartbeat(key)
 		case pb.MessageType_MsgRequestVote:
+			//log.Infof("send to %v", key)
 			r.sendVote(key)
 		case pb.MessageType_MsgAppend:
 			r.sendAppend(key)
@@ -321,7 +315,7 @@ func (r *Raft) tick() {
 
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
-	log.Infof("%v now is Follower!", r.id)
+	//log.Infof("%v now is Follower!", r.id)
 	r.State = StateFollower
 	r.Term = term
 	r.Lead = lead
@@ -329,7 +323,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
-	log.Infof("%v now is Candidate!", r.id)
+	//log.Infof("%v now is Candidate!", r.id)
 
 	r.State = StateCandidate
 	r.votes = make(map[uint64]bool)
@@ -339,10 +333,14 @@ func (r *Raft) becomeCandidate() {
 
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
-	log.Infof("%v now is Leader!", r.id)
+	//log.Infof("%v now is Leader!", r.id)
 
 	if r.State == StateCandidate {
 		r.State = StateLeader
+	}
+	for _, peer := range r.Prs {
+		peer.Match = r.RaftLog.LastIndex()
+		peer.Next = r.RaftLog.LastIndex() + 1
 	}
 	r.Lead = 0
 	r.Step(pb.Message{
@@ -419,31 +417,48 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	//check for the leadership transfer
 
 	//TODO
-	if m.Term >= r.Term {
+	if m.Term < r.Term {
+		//follower have a higher term
+		reject = true
+	}
+	if m.Term > r.Term || m.Term == r.Term && r.Lead != m.From {
+		//leadership transfer happen
 		r.becomeFollower(m.Term, m.From)
 		term = m.Term
 	}
-	if m.Term != r.Term ||
-		m.LogTerm != r.RaftLog.at(m.Index).Term {
+	if r.RaftLog.LastIndex() < m.Index {
+		//follower have a lower last index, imply there is a gap between older entries and newer entries
 		reject = true
-	} else {
-		//check for the diff between commitIndex & m.Index
-		if len(m.Entries) > 0 && r.RaftLog.at(m.Entries[len(m.Entries)-1].Index).Term != m.Entries[len(m.Entries)-1].Term {
-			//entries index over the leader will be removed
+	}
+	if term, _ := r.RaftLog.Term(m.Index); term != m.LogTerm {
+		//follower last match entry's term don't meet with leader, imply error in follower raftlog and need to be fixed
+		reject = true
+	}
+	if term, _ := r.RaftLog.Term(r.RaftLog.LastIndex()); len(m.Entries) != 0 && term > m.Entries[len(m.Entries)-1].Term {
+		//TODO I doubt it
+		//follower Raftlog is newer than current appendRequest
+		//kept refusing append will result in entirely rewritten
+		reject = true
+	}
+	if !reject {
+		//latest match entry
+		latestMatchIndex := m.Index
+
+		if len(m.Entries) != 0 {
+			//If an existing entry conflicts with a new one (same index but different terms),
+			//delete the existing entry and all that follow it; append any new entries not already in the log.
 			r.RaftLog.entries = r.RaftLog.entries[0 : m.Index-r.RaftLog.offset+1]
 			r.RaftLog.stabled = min(r.RaftLog.stabled, r.RaftLog.LastIndex())
-			//add new entries to raftlog
-			for _, value := range m.Entries {
-				r.RaftLog.entries = append(r.RaftLog.entries, *value)
-			}
+			r.RaftLog.Append(m.Entries)
+			// Now we match newer entry
+			latestMatchIndex = r.RaftLog.LastIndex()
+
 		}
-		if len(m.Entries) == 0 {
-			r.RaftLog.committed = min(m.Commit, m.Index)
-		} else {
-			r.RaftLog.committed = min(m.Commit, r.RaftLog.LastIndex())
+		if min(m.Commit, latestMatchIndex) > r.RaftLog.committed {
+			//3.If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry).
+			r.RaftLog.committed = min(m.Commit, latestMatchIndex)
 		}
 	}
-	//sync commitIndex
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgAppendResponse,
 		To:      m.From,
@@ -456,13 +471,22 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 
 func (r *Raft) handleAppendResponse(m pb.Message) {
 	// m.index = r.raftlog.commit + uint64(len(entries))
-	if m.Term != r.Term {
-		return
-	} else if m.Reject {
-		r.Prs[m.From].Match = r.Prs[m.From].Match - 1
-		r.sendAppend(m.From)
-	} else if r.RaftLog.at(m.Index).Term == r.Term {
-		r.Prs[m.From].Match = m.Index
+	if m.Reject {
+		if m.Term > r.Term || m.Index == r.RaftLog.LastIndex() {
+			//follower have a higher term
+			return
+		} else {
+			//follower have a lower last index
+			if r.Prs[m.From].Match != 0 {
+				// debug of double append, it's test-direction
+				r.Prs[m.From].Match = r.Prs[m.From].Match - 1
+			}
+			r.sendAppend(m.From)
+		}
+	} else if term, _ := r.RaftLog.Term(m.Index); term == r.Term {
+		if r.Prs[m.From].Match != m.Index {
+			r.Prs[m.From].Match = m.Index
+		}
 		r.checkCommit()
 	}
 }
@@ -478,10 +502,12 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 }
 
 func (r *Raft) handlePropose(m pb.Message) {
+	var ents []*pb.Entry
 	for _, entry := range m.Entries {
-		r.RaftLog.entries = append(r.RaftLog.entries, pb.Entry{Data: entry.Data, Term: r.Term, Index: r.RaftLog.LastIndex() + 1})
-		r.Prs[r.id].Match = r.RaftLog.LastIndex()
+		ents = append(ents, &pb.Entry{Data: entry.Data, Term: r.Term})
 	}
+	r.RaftLog.Append(ents)
+	r.Prs[r.id].Match = r.RaftLog.LastIndex()
 	for _, value := range r.Prs {
 		value.Next = r.RaftLog.LastIndex() + 1
 	}
@@ -494,12 +520,8 @@ func (r *Raft) handleBeat() {
 }
 
 func (r *Raft) handleRequestVote(m pb.Message) {
-	logTerm := uint64(0)
-	lastIndex := uint64(0)
-	if len(r.RaftLog.entries) != 0 {
-		lastIndex = r.RaftLog.LastIndex()
-		logTerm, _ = r.RaftLog.Term(r.RaftLog.LastIndex())
-	}
+	lastIndex := r.RaftLog.LastIndex()
+	logTerm, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
 
 	reject := logTerm > m.LogTerm ||
 		logTerm == m.LogTerm && lastIndex > m.Index ||
@@ -561,8 +583,17 @@ func (r *Raft) checkVoteResult() {
 }
 
 func (r *Raft) checkCommit() {
+	if len(r.Prs) == 0 {
+		// if there is only one leader and no follower
+		r.RaftLog.committed = r.RaftLog.LastIndex()
+		return
+	}
 	var commitArr []uint64
-	for _, v := range r.Prs {
+	for id, v := range r.Prs {
+		if id == r.id {
+			// the leader shouldn't be counted in
+			continue
+		}
 		commitArr = append(commitArr, v.Match)
 	}
 	tempCommit := r.RaftLog.committed + 1
@@ -576,11 +607,12 @@ func (r *Raft) checkCommit() {
 				rejected++
 			}
 		}
-		if approved <= rejected {
+		if approved < rejected {
 			break
 		}
 	}
-	if r.RaftLog.committed != tempCommit-1 {
+
+	if term, _ := r.RaftLog.Term(tempCommit - 1); term == r.Term && r.RaftLog.committed != tempCommit-1 {
 		r.RaftLog.committed = tempCommit - 1
 		r.bcastMsg(pb.MessageType_MsgAppend)
 	}

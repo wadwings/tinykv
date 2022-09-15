@@ -17,7 +17,6 @@ package raft
 import (
 	"errors"
 	"github.com/pingcap-incubator/tinykv/log"
-
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -86,6 +85,10 @@ type RawNode struct {
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
+	_, c, _ := config.Storage.InitialState()
+	if len(config.peers) == 0 {
+		config.peers = c.Nodes
+	}
 	rawNode := newRaft(config)
 	if rawNode == nil {
 		return nil, errors.New("not a vaild config")
@@ -161,12 +164,14 @@ func (rn *RawNode) Step(m pb.Message) error {
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
 	r := rn.Raft
+	log.Infof("%+v", r.msgs)
 	rd := Ready{
-		Entries:          rn.Raft.RaftLog.unstableEntries(),
+		Entries:          r.RaftLog.unstableEntries(),
 		Snapshot:         pb.Snapshot{},
-		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
-		Messages:         rn.Raft.msgs,
+		CommittedEntries: r.RaftLog.nextEnts(),
+		Messages:         r.msgs,
 	}
+	r.msgs = make([]pb.Message, 0)
 	if softState := r.softState(); !softState.IsEqual(rn.prevSoftSt) {
 		rd.SoftState = softState
 	} else {
@@ -177,7 +182,7 @@ func (rn *RawNode) Ready() Ready {
 	} else {
 		rd.HardState = pb.HardState{}
 	}
-	log.Infof("peer ID: %v \n Ready: %+v", r.id, rd)
+	//log.Infof("peer ID: %v \n Ready: %+v", r.id, rd)
 	return rd
 
 }

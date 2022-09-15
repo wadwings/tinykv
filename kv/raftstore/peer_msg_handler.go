@@ -43,18 +43,14 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	if d.stopped || !d.RaftGroup.HasReady() {
 		return
 	}
+	log.Infof("%v start HandleRaftReady", d.PeerId())
 	ready := d.RaftGroup.Ready()
+	log.Infof("%+v", ready)
 	if _, err := d.peerStorage.SaveReadyState(&ready); err != nil {
 		return
 	}
-	for _, msg := range ready.Messages {
-		_ = d.ctx.trans.Send(&rspb.RaftMessage{
-			RegionId: d.regionId,
-			FromPeer: d.peerCache[msg.From],
-			ToPeer:   d.peerCache[msg.To],
-			Message:  &msg,
-		})
-	}
+	d.RaftGroup.Advance(ready)
+	d.Send(d.ctx.trans, ready.Messages)
 
 	// Your Code Here (2B).
 }
@@ -265,9 +261,9 @@ func (d *peerMsgHandler) validateRaftMessage(msg *rspb.RaftMessage) bool {
 	return true
 }
 
-/// Checks if the message is sent to the correct peer.
-///
-/// Returns true means that the message can be dropped silently.
+// / Checks if the message is sent to the correct peer.
+// /
+// / Returns true means that the message can be dropped silently.
 func (d *peerMsgHandler) checkMessage(msg *rspb.RaftMessage) bool {
 	fromEpoch := msg.GetRegionEpoch()
 	isVoteMsg := util.IsVoteMessage(msg.Message)

@@ -21,10 +21,11 @@ import (
 
 // RaftLog manage the log entries, its struct look like:
 //
-//  snapshot/first.....applied....committed....stabled.....last
-//  --------|------------------------------------------------|
-//                            log entries
-//]
+//	snapshot/first.....applied....committed....stabled.....last
+//	--------|------------------------------------------------|
+//	                          log entries
+//
+// ]
 // for simplify the RaftLog implement should manage all log entries
 // that not truncated
 type RaftLog struct {
@@ -60,30 +61,17 @@ type RaftLog struct {
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
 	// Your Code Here (2A).
-	lastIndex, err := storage.LastIndex()
-	if err != nil {
-		return nil
-	}
-	firstIndex, err := storage.FirstIndex()
-	if err != nil {
-		return nil
-	}
-	entries, err := storage.Entries(firstIndex, lastIndex+1)
-	if err != nil {
-		return nil
-	}
-	firstIndex--
-	offset := uint64(1)
+	lastIndex, _ := storage.LastIndex()
+	firstIndex, _ := storage.FirstIndex()
+	entries, _ := storage.Entries(firstIndex, lastIndex+1)
+	//entries range : entries[firstIndex - offset, lastIndex + 1 - offset]
 	hardState, _, _ := storage.InitialState()
-	if len(entries) != 0 {
-		offset = entries[0].Index
-	}
 	return &RaftLog{
 		storage:   storage,
-		applied:   firstIndex,
+		applied:   firstIndex - 1,
 		stabled:   lastIndex,
 		entries:   entries,
-		offset:    offset,
+		offset:    firstIndex,
 		committed: hardState.Commit,
 	}
 }
@@ -96,8 +84,8 @@ func (l *RaftLog) maybeCompact() {
 }
 
 func (l *RaftLog) at(index uint64) *pb.Entry {
-	if len(l.entries) == 0 || index-l.offset > uint64(len(l.entries)-1) {
-		return &pb.Entry{Index: 0, Term: 0, Data: nil}
+	if len(l.entries) == 0 || index > l.LastIndex() {
+		return &pb.Entry{}
 	}
 	return &l.entries[index-l.offset]
 }
@@ -107,7 +95,7 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 	if len(l.entries) == 0 {
 		return nil
 	}
-	return l.entries[l.stabled+1-l.offset : l.LastIndex()+1-l.offset]
+	return l.entries[l.stabled-l.offset+1 : l.LastIndex()-l.offset+1]
 }
 
 // nextEnts returns all the committed but not applied entries
@@ -115,23 +103,34 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	if len(l.entries) == 0 {
 		return nil
 	}
-	return l.entries[l.applied+1-l.offset : l.committed+1-l.offset]
+	return l.entries[l.applied-l.offset+1 : l.committed-l.offset+1]
 }
 
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	if len(l.entries) == 0 {
-		return 0
+		return l.offset - 1
 	}
 	return l.entries[len(l.entries)-1].Index
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
-	if i > l.LastIndex() {
+	if i < l.offset || i > l.LastIndex() {
 		return 0, errors.New("read uninitialized address buffer")
 	}
-	return l.entries[i-l.offset].Term, nil
+	return l.at(i).Term, nil
+}
+
+func (l *RaftLog) Append(entries []*pb.Entry) {
+	for _, entry := range entries {
+		if len(l.entries) == 0 {
+			entry.Index = l.offset
+		} else {
+			entry.Index = l.LastIndex() + 1
+		}
+		l.entries = append(l.entries, *entry)
+	}
 }
 
 func (l *RaftLog) Commit(entries []pb.Entry) uint64 {

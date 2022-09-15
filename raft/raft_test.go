@@ -17,7 +17,6 @@ package raft
 import (
 	"bytes"
 	"fmt"
-	"github.com/pingcap-incubator/tinykv/log"
 	"math/rand"
 	"reflect"
 	"testing"
@@ -565,10 +564,10 @@ func TestProposal2AB(t *testing.T) {
 }
 
 // TestHandleMessageType_MsgAppend ensures:
-// 1. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm.
-// 2. If an existing entry conflicts with a new one (same index but different terms),
-//    delete the existing entry and all that follow it; append any new entries not already in the log.
-// 3. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry).
+//  1. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm.
+//  2. If an existing entry conflicts with a new one (same index but different terms),
+//     delete the existing entry and all that follow it; append any new entries not already in the log.
+//  3. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry).
 func TestHandleMessageType_MsgAppend2AB(t *testing.T) {
 	tests := []struct {
 		m       pb.Message
@@ -1605,7 +1604,7 @@ func newNetworkWithConfig(configFunc func(*Config), peers ...stateMachine) *netw
 
 func (nw *network) send(msgs ...pb.Message) {
 	for len(msgs) > 0 {
-		log.Infof("%v", msgs[0])
+		//log.Infof("%v", msgs[0])
 		m := msgs[0]
 		p := nw.peers[m.To]
 		p.Step(m)
