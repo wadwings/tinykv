@@ -2,6 +2,7 @@ package raftstore
 
 import (
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"time"
 
@@ -43,13 +44,35 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	if d.stopped || !d.RaftGroup.HasReady() {
 		return
 	}
-	log.Infof("%v start HandleRaftReady", d.PeerId())
+	//log.Infof("%v start HandleRaftReady", d.PeerId())
 	ready := d.RaftGroup.Ready()
-	log.Infof("%+v", ready)
+	//log.Infof("%+v", ready)
+	//log.Infof("%+v", ready.Messages)
 	if _, err := d.peerStorage.SaveReadyState(&ready); err != nil {
 		return
 	}
 	d.RaftGroup.Advance(ready)
+	if d.IsLeader() && len(ready.CommittedEntries) != 0 {
+		for _, entry := range ready.CommittedEntries {
+			for i := range d.proposals {
+				if d.proposals[i].index == entry.Index && d.proposals[i].term == entry.Term {
+					var request raft_cmdpb.Request
+					err := request.Unmarshal(entry.Data)
+					if err != nil {
+						return
+					}
+					d.proposals[i].cb.Done(&raft_cmdpb.RaftCmdResponse{
+						Header: &raft_cmdpb.RaftResponseHeader{},
+						Responses: []*raft_cmdpb.Response{{
+							CmdType: request.CmdType,
+						}},
+					})
+					d.proposals = append(d.proposals[:i], d.proposals[i+1:]...)
+					break
+				}
+			}
+		}
+	}
 	d.Send(d.ctx.trans, ready.Messages)
 
 	// Your Code Here (2B).
@@ -124,34 +147,78 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 	var msgs []eraftpb.Message
+	response := newCmdResp()
 	for _, request := range msg.Requests {
 		switch request.CmdType {
 		case raft_cmdpb.CmdType_Get:
 			{
+				value, err := engine_util.GetCF(d.peerStorage.Engines.Kv, request.Get.Cf, request.Get.Key)
+				if err != nil {
+					cb.Done(ErrResp(err))
+				} else {
+					response.Responses = append(response.Responses, &raft_cmdpb.Response{
+						CmdType: request.CmdType,
+						Get: &raft_cmdpb.GetResponse{
+							Value: value,
+						},
+					})
+				}
+				cb.Done(response)
 			}
 		case raft_cmdpb.CmdType_Put:
 			{
 				str, _ := request.Marshal()
 				msgs = append(msgs, eraftpb.Message{
 					MsgType: eraftpb.MessageType_MsgPropose,
-					To:      d.LeaderId(),
+					To:      d.GetLead(),
 					Entries: []*eraftpb.Entry{{Data: str}},
 				})
+				d.peer.proposals = append(d.peer.proposals, &proposal{
+					term:  d.Term(),
+					index: d.RaftGroup.Raft.RaftLog.NextIndex(),
+					cb:    cb,
+				})
+				//cb.WaitResp()
 			}
 		case raft_cmdpb.CmdType_Delete:
 			{
 				str, _ := request.Marshal()
 				msgs = append(msgs, eraftpb.Message{
 					MsgType: eraftpb.MessageType_MsgPropose,
-					To:      d.LeaderId(),
+					To:      d.GetLead(),
 					Entries: []*eraftpb.Entry{{Data: str}},
 				})
+				d.peer.proposals = append(d.peer.proposals, &proposal{
+					term:  d.Term(),
+					index: d.RaftGroup.Raft.RaftLog.NextIndex(),
+					cb:    cb,
+				})
+				//cb.WaitResp()
+			}
+		case raft_cmdpb.CmdType_Snap:
+			{
+				cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+				response.Responses = append(response.Responses, &raft_cmdpb.Response{
+					CmdType: request.CmdType,
+					Snap: &raft_cmdpb.SnapResponse{
+						Region: d.Region(),
+					},
+				})
+				cb.Done(response)
 			}
 		}
 	}
 	d.Send(d.ctx.trans, msgs)
-
+	//log.Infof("send msgs, %+v", msgs)
 	// Your Code Here (2B).
+}
+
+func (d *peerMsgHandler) GetLead() uint64 {
+	if d.IsLeader() {
+		return d.PeerId()
+	} else {
+		return d.LeaderId()
+	}
 }
 
 func (d *peerMsgHandler) onTick() {

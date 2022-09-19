@@ -3,6 +3,7 @@ package raftstore
 import (
 	"bytes"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 	"time"
 
 	"github.com/Connor1996/badger"
@@ -307,6 +308,9 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 // Append the given entries to the raft log and update ps.raftState also delete log entries that will
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
+	if len(entries) == 0 {
+		return nil
+	}
 	lastEntry := &entries[len(entries)-1]
 	for i := ps.raftState.HardState.Commit; i <= lastEntry.Index; i++ {
 		raftWB.DeleteMeta(meta.RaftLogKey(ps.region.Id, i))
@@ -320,6 +324,40 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 	ps.raftState.LastIndex = lastEntry.Index
 	ps.raftState.LastTerm = lastEntry.Term
 	// Your Code Here (2B).
+	return nil
+}
+
+func (ps *PeerStorage) Apply(committedEntries []eraftpb.Entry, kvWB *engine_util.WriteBatch) error {
+	if len(committedEntries) == 0 {
+		return nil
+	}
+	for _, entry := range committedEntries {
+		var request raft_cmdpb.Request
+		if err := request.Unmarshal(entry.Data); err != nil {
+			return err
+		}
+		switch request.CmdType {
+		case raft_cmdpb.CmdType_Put:
+			{
+				kvWB.SetCF(request.Put.Cf, request.Put.Key, request.Put.Value)
+			}
+		case raft_cmdpb.CmdType_Delete:
+			{
+				kvWB.DeleteCF(request.Delete.Cf, request.Delete.Key)
+			}
+		}
+	}
+	ps.applyState.AppliedIndex = committedEntries[len(committedEntries)-1].Index
+	return nil
+}
+
+func (ps *PeerStorage) SaveState(raftWB *engine_util.WriteBatch, kvWB *engine_util.WriteBatch, rd *raft.Ready) error {
+	if err := raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), &rd.HardState); err != nil {
+		return err
+	}
+	//if err := kvWB.SetMeta(meta.ApplyStateKey(ps.region.Id), &ps.applyState); err != nil {
+	//	return err
+	//}
 	return nil
 }
 
@@ -342,12 +380,21 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 // Do not modify ready in this function, this is a requirement to advance the ready object properly later.
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	var raftWB engine_util.WriteBatch
-	if len(ready.Entries) != 0 {
-		if err := ps.Append(ready.Entries, &raftWB); err != nil {
-			return nil, err
-		}
+	var kvWB engine_util.WriteBatch
+	if err := ps.Append(ready.Entries, &raftWB); err != nil {
+		return nil, err
 	}
-	if err := raftWB.WriteToDB(ps.Engines.Raft); err != nil {
+	if err := ps.Apply(ready.CommittedEntries, &kvWB); err != nil {
+		return nil, err
+	}
+	if err := raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), &ready.HardState); err != nil {
+		return nil, err
+	}
+
+	if err := ps.Engines.WriteRaft(&raftWB); err != nil {
+		return nil, err
+	}
+	if err := ps.Engines.WriteKV(&kvWB); err != nil {
 		return nil, err
 	}
 	ps.raftState.HardState = &ready.HardState

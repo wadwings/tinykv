@@ -114,6 +114,14 @@ func (l *RaftLog) LastIndex() uint64 {
 	return l.entries[len(l.entries)-1].Index
 }
 
+func (l *RaftLog) NextIndex() uint64 {
+	if len(l.entries) == 0 {
+		return l.offset
+	} else {
+		return l.LastIndex() + 1
+	}
+}
+
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	if i < l.offset || i > l.LastIndex() {
@@ -124,11 +132,7 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 
 func (l *RaftLog) Append(entries []*pb.Entry) {
 	for _, entry := range entries {
-		if len(l.entries) == 0 {
-			entry.Index = l.offset
-		} else {
-			entry.Index = l.LastIndex() + 1
-		}
+		entry.Index = l.NextIndex()
 		l.entries = append(l.entries, *entry)
 	}
 }

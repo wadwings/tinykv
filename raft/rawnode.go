@@ -16,7 +16,6 @@ package raft
 
 import (
 	"errors"
-	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -164,7 +163,7 @@ func (rn *RawNode) Step(m pb.Message) error {
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
 	r := rn.Raft
-	log.Infof("%+v", r.msgs)
+	//log.Infof("%+v", r.msgs)
 	rd := Ready{
 		Entries:          r.RaftLog.unstableEntries(),
 		Snapshot:         pb.Snapshot{},

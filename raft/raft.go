@@ -298,7 +298,7 @@ func (r *Raft) bcastMsg(msgType pb.MessageType) {
 func (r *Raft) tick() {
 	if r.State == StateLeader {
 		r.heartbeatElapsed++
-		if r.heartbeatElapsed == r.heartbeatTimeout {
+		if r.heartbeatElapsed >= r.heartbeatTimeout {
 			r.bcastMsg(pb.MessageType_MsgHeartbeat)
 			r.heartbeatElapsed = 0
 		}
@@ -420,6 +420,9 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	if m.Term < r.Term {
 		//follower have a higher term
 		reject = true
+	}
+	if m.Term == r.Term && m.From == r.Lead {
+		r.electionElapsed = 0
 	}
 	if m.Term > r.Term || m.Term == r.Term && r.Lead != m.From {
 		//leadership transfer happen
