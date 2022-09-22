@@ -83,8 +83,8 @@ type peer struct {
 
 	// Record the callback of the proposals
 	// (Used in 2B)
-	proposals []*proposal
-
+	proposals    []*proposal
+	SnapCallBack []*message.Callback
 	// Index of last scheduled compacted raft log.
 	// (Used in 2C)
 	LastCompactedIdx uint64

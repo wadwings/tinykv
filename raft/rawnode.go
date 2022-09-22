@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -184,6 +185,17 @@ func (rn *RawNode) Ready() Ready {
 	//log.Infof("peer ID: %v \n Ready: %+v", r.id, rd)
 	return rd
 
+}
+
+func (rn *RawNode) RegisterSnapRequest(fn func(err error)) {
+	rn.Raft.SnapCallback = append(rn.Raft.SnapCallback, fn)
+}
+
+func (rn *RawNode) EmptySnapRequest() {
+	for _, fn := range rn.Raft.SnapCallback {
+		fn(&util.ErrNotLeader{})
+	}
+	rn.Raft.SnapCallback = make([]func(err error), 0)
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.

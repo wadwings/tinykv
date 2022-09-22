@@ -15,6 +15,7 @@
 package raft
 
 import (
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pkg/errors"
 )
@@ -54,6 +55,7 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 	// Your Data Here (2A).
 
+	//firstIndex
 	offset uint64
 }
 
@@ -141,6 +143,7 @@ func (l *RaftLog) Commit(entries []pb.Entry) uint64 {
 	if len(entries) != 0 {
 		l.committed = entries[len(entries)-1].Index
 	}
+	l.IndexCheck()
 	return l.committed
 }
 
@@ -148,6 +151,7 @@ func (l *RaftLog) Stable(entries []pb.Entry) uint64 {
 	if len(entries) != 0 {
 		l.stabled = entries[len(entries)-1].Index
 	}
+	l.IndexCheck()
 	return l.stabled
 }
 
@@ -155,5 +159,19 @@ func (l *RaftLog) Apply(entries []pb.Entry) uint64 {
 	if len(entries) != 0 {
 		l.applied = entries[len(entries)-1].Index
 	}
+	l.IndexCheck()
 	return l.applied
+}
+
+func (l *RaftLog) IndexCheck() {
+	if l.applied > l.committed {
+		log.Fatalf("raftlog applied index %d > committed index %d", l.applied, l.committed)
+	}
+	if l.committed > l.LastIndex() {
+		log.Fatalf("raftlog committed index %d > last index %d", l.committed, l.LastIndex())
+	}
+	if l.stabled > l.LastIndex() {
+		log.Fatalf("raftlog stabled index %d > last index %d", l.stabled, l.LastIndex())
+	}
+
 }

@@ -52,30 +52,44 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		return
 	}
 	d.RaftGroup.Advance(ready)
-	if d.IsLeader() && len(ready.CommittedEntries) != 0 {
-		for _, entry := range ready.CommittedEntries {
-			for i := range d.proposals {
-				if d.proposals[i].index == entry.Index && d.proposals[i].term == entry.Term {
-					var request raft_cmdpb.Request
-					err := request.Unmarshal(entry.Data)
-					if err != nil {
-						return
-					}
-					d.proposals[i].cb.Done(&raft_cmdpb.RaftCmdResponse{
-						Header: &raft_cmdpb.RaftResponseHeader{},
-						Responses: []*raft_cmdpb.Response{{
-							CmdType: request.CmdType,
-						}},
-					})
-					d.proposals = append(d.proposals[:i], d.proposals[i+1:]...)
-					break
-				}
-			}
-		}
-	}
+	d.HandleProposal(ready.CommittedEntries)
 	d.Send(d.ctx.trans, ready.Messages)
 
 	// Your Code Here (2B).
+}
+
+func (d *peerMsgHandler) HandleNotLeaderProposal() {
+	for _, proposal := range d.proposals {
+		proposal.cb.Done(ErrResp(&util.ErrNotLeader{RegionId: d.regionId, Leader: d.getPeerFromCache(d.GetLead())}))
+	}
+	d.proposals = make([]*proposal, 0)
+}
+
+func (d *peerMsgHandler) HandleProposal(entries []eraftpb.Entry) {
+	if !d.IsLeader() {
+		d.HandleNotLeaderProposal()
+		d.RaftGroup.EmptySnapRequest()
+		return
+	}
+	for _, entry := range entries {
+		for i := range d.proposals {
+			if d.proposals[i].index == entry.Index && d.proposals[i].term == entry.Term {
+				proposal := d.proposals[i]
+				var request raft_cmdpb.Request
+				if err := request.Unmarshal(entry.Data); err != nil {
+					proposal.cb.Done(ErrResp(err))
+				}
+				proposal.cb.Done(&raft_cmdpb.RaftCmdResponse{
+					Header: &raft_cmdpb.RaftResponseHeader{},
+					Responses: []*raft_cmdpb.Response{{
+						CmdType: request.CmdType,
+					}},
+				})
+				d.proposals = append(d.proposals[:i], d.proposals[i+1:]...)
+				break
+			}
+		}
+	}
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -146,7 +160,6 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		cb.Done(ErrResp(err))
 		return
 	}
-	var msgs []eraftpb.Message
 	response := newCmdResp()
 	for _, request := range msg.Requests {
 		switch request.CmdType {
@@ -165,52 +178,44 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 				}
 				cb.Done(response)
 			}
-		case raft_cmdpb.CmdType_Put:
-			{
-				str, _ := request.Marshal()
-				msgs = append(msgs, eraftpb.Message{
-					MsgType: eraftpb.MessageType_MsgPropose,
-					To:      d.GetLead(),
-					Entries: []*eraftpb.Entry{{Data: str}},
-				})
-				d.peer.proposals = append(d.peer.proposals, &proposal{
-					term:  d.Term(),
-					index: d.RaftGroup.Raft.RaftLog.NextIndex(),
-					cb:    cb,
-				})
-				//cb.WaitResp()
-			}
-		case raft_cmdpb.CmdType_Delete:
-			{
-				str, _ := request.Marshal()
-				msgs = append(msgs, eraftpb.Message{
-					MsgType: eraftpb.MessageType_MsgPropose,
-					To:      d.GetLead(),
-					Entries: []*eraftpb.Entry{{Data: str}},
-				})
-				d.peer.proposals = append(d.peer.proposals, &proposal{
-					term:  d.Term(),
-					index: d.RaftGroup.Raft.RaftLog.NextIndex(),
-					cb:    cb,
-				})
-				//cb.WaitResp()
-			}
 		case raft_cmdpb.CmdType_Snap:
-			{
-				cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
-				response.Responses = append(response.Responses, &raft_cmdpb.Response{
-					CmdType: request.CmdType,
-					Snap: &raft_cmdpb.SnapResponse{
-						Region: d.Region(),
-					},
+			cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+			d.RaftGroup.RegisterSnapRequest(func(err error) {
+				if err != nil {
+					cb.Done(ErrRespStaleCommand(d.Term()))
+					return
+				}
+				cb.Done(&raft_cmdpb.RaftCmdResponse{
+					Header: &raft_cmdpb.RaftResponseHeader{},
+					Responses: []*raft_cmdpb.Response{{
+						CmdType: request.CmdType,
+						Snap:    &raft_cmdpb.SnapResponse{Region: d.Region()},
+					}},
 				})
-				cb.Done(response)
+			})
+		case raft_cmdpb.CmdType_Put:
+			fallthrough
+		case raft_cmdpb.CmdType_Delete:
+			str, _ := request.Marshal()
+			d.peer.proposals = append(d.peer.proposals, &proposal{
+				term:  d.Term(),
+				index: d.nextProposalIndex(),
+				cb:    cb,
+			})
+			err := d.peer.RaftGroup.Raft.Step(eraftpb.Message{
+				MsgType: eraftpb.MessageType_MsgPropose,
+				To:      d.GetLead(),
+				Entries: []*eraftpb.Entry{{Data: str}},
+			})
+			if err != nil {
+				cb.Done(ErrResp(err))
 			}
 		}
+
 	}
-	d.Send(d.ctx.trans, msgs)
-	//log.Infof("send msgs, %+v", msgs)
-	// Your Code Here (2B).
+	if msg.AdminRequest != nil {
+		log.Infof("%+v", msg.AdminRequest)
+	}
 }
 
 func (d *peerMsgHandler) GetLead() uint64 {

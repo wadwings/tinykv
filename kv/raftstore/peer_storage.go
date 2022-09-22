@@ -320,7 +320,6 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 			return err
 		}
 	}
-
 	ps.raftState.LastIndex = lastEntry.Index
 	ps.raftState.LastTerm = lastEntry.Term
 	// Your Code Here (2B).
@@ -340,6 +339,7 @@ func (ps *PeerStorage) Apply(committedEntries []eraftpb.Entry, kvWB *engine_util
 		case raft_cmdpb.CmdType_Put:
 			{
 				kvWB.SetCF(request.Put.Cf, request.Put.Key, request.Put.Value)
+				//log.Warnf("%v Put Value %s", ps.Tag, request.Put.Value)
 			}
 		case raft_cmdpb.CmdType_Delete:
 			{
@@ -352,12 +352,23 @@ func (ps *PeerStorage) Apply(committedEntries []eraftpb.Entry, kvWB *engine_util
 }
 
 func (ps *PeerStorage) SaveState(raftWB *engine_util.WriteBatch, kvWB *engine_util.WriteBatch, rd *raft.Ready) error {
-	if err := raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), &rd.HardState); err != nil {
+	if err := raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState); err != nil {
 		return err
 	}
-	//if err := kvWB.SetMeta(meta.ApplyStateKey(ps.region.Id), &ps.applyState); err != nil {
-	//	return err
-	//}
+	if raft.IsEmptyHardState(*ps.raftState.HardState) {
+		log.Fatalf("RaftLocalState.HardState is empty!")
+	}
+	if err := kvWB.SetMeta(meta.ApplyStateKey(ps.region.Id), ps.applyState); err != nil {
+		return err
+	}
+	localState := rspb.RegionLocalState{
+		State:  rspb.PeerState_Normal,
+		Region: ps.region,
+	}
+	if err := kvWB.SetMeta(meta.RegionStateKey(ps.region.Id), &localState); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -381,13 +392,17 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	var raftWB engine_util.WriteBatch
 	var kvWB engine_util.WriteBatch
+	if !raft.IsEmptyHardState(ready.HardState) {
+		ps.raftState.HardState = &ready.HardState
+	}
 	if err := ps.Append(ready.Entries, &raftWB); err != nil {
 		return nil, err
 	}
 	if err := ps.Apply(ready.CommittedEntries, &kvWB); err != nil {
 		return nil, err
 	}
-	if err := raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), &ready.HardState); err != nil {
+	err := ps.SaveState(&raftWB, &kvWB, ready)
+	if err != nil {
 		return nil, err
 	}
 

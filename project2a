@@ -1,1 +1,0 @@
-GO111MODULE=on go test -v --count=1 --parallel=1 -p=1 ./kv/test_raftstore -run 2B

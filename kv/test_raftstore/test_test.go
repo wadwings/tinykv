@@ -115,7 +115,7 @@ func partitioner(t *testing.T, cluster *Cluster, ch chan bool, done *int32, unre
 			}
 		}
 		cluster.ClearFilters()
-		log.Infof("partition: %v, %v", pa[0], pa[1])
+		log.Warnf("partition: %v, %v", pa[0], pa[1])
 		cluster.AddFilter(&PartitionFilter{
 			s1: pa[0],
 			s2: pa[1],

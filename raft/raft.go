@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"math/rand"
 )
@@ -124,6 +125,8 @@ type Raft struct {
 
 	// votes records
 	votes map[uint64]bool
+	// recent alive peers
+	alives map[uint64]bool
 
 	// msgs need to send
 	msgs []pb.Message
@@ -131,12 +134,15 @@ type Raft struct {
 	// the leader id
 	Lead uint64
 
+	SnapCallback []func(err error)
 	// heartbeat interval, should send
 	heartbeatTimeout int
 	// baseline of election interval
 	electionBaseline int
 
 	electionTimeout int
+
+	leaderLeaseElapsed int
 	// number of ticks since it reached last heartbeatTimeout.
 	// only leader keeps heartbeatElapsed.
 	heartbeatElapsed int
@@ -184,16 +190,19 @@ func newRaft(c *Config) *Raft {
 		return nil
 	}
 	return &Raft{
-		id:               c.ID,
-		State:            StateFollower,
-		electionBaseline: c.ElectionTick,
-		electionTimeout:  randomizedTimeout(c.ElectionTick),
-		heartbeatTimeout: c.HeartbeatTick,
-		Term:             hardState.Term,
-		Prs:              prs,
-		votes:            make(map[uint64]bool),
-		Vote:             hardState.Vote,
-		RaftLog:          raftLog,
+		id:                 c.ID,
+		State:              StateFollower,
+		electionBaseline:   c.ElectionTick,
+		electionTimeout:    randomizedTimeout(c.ElectionTick),
+		heartbeatTimeout:   c.HeartbeatTick,
+		leaderLeaseElapsed: 0,
+		Term:               hardState.Term,
+		Prs:                prs,
+		votes:              make(map[uint64]bool),
+		alives:             map[uint64]bool{},
+		SnapCallback:       make([]func(err error), 0),
+		Vote:               hardState.Vote,
+		RaftLog:            raftLog,
 	}
 }
 
@@ -278,6 +287,11 @@ func (r *Raft) sendVote(to uint64) {
 
 func (r *Raft) bcastMsg(msgType pb.MessageType) {
 	//log.Infof("%v broadcast Msg, %+v", r.id, msgType)
+	if msgType == pb.MessageType_MsgHeartbeat {
+		//log.Infof("%d broadcast heart beat", r.id)
+		r.countLeaderLease()
+		r.checkLeaderLease()
+	}
 	for key := range r.Prs {
 		if key == r.id {
 			continue
@@ -315,6 +329,9 @@ func (r *Raft) tick() {
 
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
+	if r.State == StateLeader {
+		log.Warnf("leader %v now become follower", r.id)
+	}
 	//log.Infof("%v now is Follower!", r.id)
 	r.State = StateFollower
 	r.Term = term
@@ -323,17 +340,18 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
-	//log.Infof("%v now is Candidate!", r.id)
+	log.Infof("%v now is Candidate!", r.id)
 
 	r.State = StateCandidate
 	r.votes = make(map[uint64]bool)
 	r.votes[r.id] = true
+	r.Vote = r.id
 	r.Term++
 }
 
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
-	//log.Infof("%v now is Leader!", r.id)
+	log.Warnf("%v now is Leader!", r.id)
 
 	if r.State == StateCandidate {
 		r.State = StateLeader
@@ -343,6 +361,7 @@ func (r *Raft) becomeLeader() {
 		peer.Next = r.RaftLog.LastIndex() + 1
 	}
 	r.Lead = 0
+	r.leaderLeaseElapsed = 0
 	r.Step(pb.Message{
 		MsgType: pb.MessageType_MsgPropose,
 		To:      r.id,
@@ -403,6 +422,8 @@ func (r *Raft) Step(m pb.Message) error {
 				r.handleBeat()
 			case pb.MessageType_MsgAppendResponse:
 				r.handleAppendResponse(m)
+			case pb.MessageType_MsgHeartbeatResponse:
+				r.handleHeartBeatResponse(m)
 			}
 		}
 	}
@@ -480,7 +501,7 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 			return
 		} else {
 			//follower have a lower last index
-			if r.Prs[m.From].Match != 0 {
+			if r.Prs[m.From].Match != r.RaftLog.offset-1 {
 				// debug of double append, it's test-direction
 				r.Prs[m.From].Match = r.Prs[m.From].Match - 1
 			}
@@ -497,11 +518,87 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 // handleHeartbeat handle Heartbeat RPC request
 func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
-	if m.Term >= r.Term {
+	reject := false
+
+	if m.Term > r.Term {
 		r.becomeFollower(m.Term, m.From)
-		r.RaftLog.committed = m.Commit
 	}
-	r.electionElapsed = 0
+	if m.Term == r.Term && r.Lead == m.From {
+		//TODO
+		if m.Commit > r.RaftLog.LastIndex() {
+			reject = true
+		} else {
+			//TODO
+			if r.RaftLog.committed < m.Commit {
+				r.RaftLog.committed = m.Commit
+				r.RaftLog.IndexCheck()
+			}
+		}
+		r.electionElapsed = 0
+	} else {
+		//This shouldn't happen
+		reject = true
+	}
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType: pb.MessageType_MsgHeartbeatResponse,
+		To:      m.From,
+		From:    r.id,
+		Term:    r.Term,
+		Index:   r.RaftLog.LastIndex(),
+		Reject:  reject,
+	})
+}
+
+func (r *Raft) handleHeartBeatResponse(m pb.Message) {
+	if m.Reject == true {
+		m.MsgType = pb.MessageType_MsgAppendResponse
+		r.handleAppendResponse(m)
+	}
+	if m.Term == r.Term {
+		r.alives[m.From] = true
+		r.checkLeaderLease()
+	}
+}
+
+func (r *Raft) checkLeaderLease() {
+	if r.State != StateLeader {
+		return
+	}
+	if len(r.Prs) == 1 {
+		r.leaderLeaseElapsed = 0
+	}
+	//log.Infof("%+v", r.alives)
+	approved := 0
+	for _, v := range r.alives {
+		if v {
+			approved++
+		}
+	}
+	if approved >= len(r.Prs)/2 {
+		r.HandleSnapRequest()
+		r.leaderLeaseElapsed = 0
+	}
+}
+
+func (r *Raft) HandleSnapRequest() {
+	for _, fn := range r.SnapCallback {
+		fn(nil)
+	}
+	r.SnapCallback = make([]func(err error), 0)
+}
+
+func (r *Raft) countLeaderLease() {
+	if r.State != StateLeader {
+		return
+	}
+	for i := range r.alives {
+		r.alives[i] = false
+	}
+	r.leaderLeaseElapsed++
+	if r.leaderLeaseElapsed > 3 {
+		log.Warnf("%d fallback to follower!", r.id)
+		r.becomeFollower(r.Term, 0)
+	}
 }
 
 func (r *Raft) handlePropose(m pb.Message) {
@@ -578,6 +675,7 @@ func (r *Raft) checkVoteResult() {
 			approved++
 		}
 	}
+	//log.Infof("%d: %+v", r.id, r.votes)
 	if approved > (len(r.Prs) / 2) {
 		r.becomeLeader()
 	} else if len(r.votes) == len(r.Prs) {
