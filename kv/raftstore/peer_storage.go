@@ -312,7 +312,7 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 		return nil
 	}
 	lastEntry := &entries[len(entries)-1]
-	for i := ps.raftState.HardState.Commit; i <= lastEntry.Index; i++ {
+	for i := entries[0].Index; i <= ps.raftState.LastIndex; i++ {
 		raftWB.DeleteMeta(meta.RaftLogKey(ps.region.Id, i))
 	}
 	for _, entry := range entries {
@@ -332,14 +332,26 @@ func (ps *PeerStorage) Apply(committedEntries []eraftpb.Entry, kvWB *engine_util
 	}
 	for _, entry := range committedEntries {
 		var request raft_cmdpb.Request
+		if entry.Data == nil {
+			continue
+		}
 		if err := request.Unmarshal(entry.Data); err != nil {
-			return err
+			var adminRequest raft_cmdpb.AdminRequest
+			if err := adminRequest.Unmarshal(entry.Data); err != nil {
+				continue
+			}
+			switch adminRequest.CmdType {
+			case raft_cmdpb.AdminCmdType_CompactLog:
+				ps.applyState.TruncatedState.Index = adminRequest.CompactLog.CompactIndex
+				ps.applyState.TruncatedState.Term = adminRequest.CompactLog.CompactTerm
+			}
+			continue
 		}
 		switch request.CmdType {
 		case raft_cmdpb.CmdType_Put:
 			{
 				kvWB.SetCF(request.Put.Cf, request.Put.Key, request.Put.Value)
-				//log.Warnf("%v Put Value %s", ps.Tag, request.Put.Value)
+				log.Infof("%v Put Value %s, entry index: %v", ps.Tag, request.Put.Value, entry.Index)
 			}
 		case raft_cmdpb.CmdType_Delete:
 			{
@@ -412,7 +424,6 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	if err := ps.Engines.WriteKV(&kvWB); err != nil {
 		return nil, err
 	}
-	ps.raftState.HardState = &ready.HardState
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
 

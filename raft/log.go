@@ -15,7 +15,6 @@
 package raft
 
 import (
-	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pkg/errors"
 )
@@ -165,13 +164,13 @@ func (l *RaftLog) Apply(entries []pb.Entry) uint64 {
 
 func (l *RaftLog) IndexCheck() {
 	if l.applied > l.committed {
-		log.Fatalf("raftlog applied index %d > committed index %d", l.applied, l.committed)
+		panic("")
 	}
 	if l.committed > l.LastIndex() {
-		log.Fatalf("raftlog committed index %d > last index %d", l.committed, l.LastIndex())
+		panic("")
 	}
 	if l.stabled > l.LastIndex() {
-		log.Fatalf("raftlog stabled index %d > last index %d", l.stabled, l.LastIndex())
+		panic("")
 	}
 
 }
