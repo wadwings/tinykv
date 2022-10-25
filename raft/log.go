@@ -180,7 +180,8 @@ func (l *RaftLog) GetSnapshot() (*pb.Snapshot, error) {
 		snapshot, err = l.storage.Snapshot()
 		if err != nil {
 			time.Sleep(200 * time.Millisecond)
-			continue
+		} else {
+			break
 		}
 	}
 	return &snapshot, err
@@ -216,4 +217,8 @@ func (l *RaftLog) truncateEntries(term uint64, index uint64) {
 	l.stabled = max(l.stabled, index)
 	l.applied = max(l.applied, index)
 	l.committed = max(l.committed, index)
+}
+
+func (l *RaftLog) HasPendingSnapshot() bool {
+	return l.pendingSnapshot != nil
 }

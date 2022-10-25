@@ -167,7 +167,6 @@ func (rn *RawNode) Ready() Ready {
 	//log.Infof("%+v", r.msgs)
 	rd := Ready{
 		Entries:          r.RaftLog.unstableEntries(),
-		Snapshot:         pb.Snapshot{},
 		CommittedEntries: r.RaftLog.nextEnts(),
 		Messages:         r.msgs,
 	}
@@ -181,6 +180,9 @@ func (rn *RawNode) Ready() Ready {
 		rd.HardState = hardState
 	} else {
 		rd.HardState = pb.HardState{}
+	}
+	if r.RaftLog.HasPendingSnapshot() {
+		rd.Snapshot = *r.RaftLog.pendingSnapshot
 	}
 	//log.Infof("peer ID: %v \n Ready: %+v", r.id, rd)
 	return rd
@@ -198,7 +200,7 @@ func (rn *RawNode) RegisterSnapRequest(fn func(err error)) {
 
 func (rn *RawNode) EmptySnapRequest() {
 	for _, fn := range rn.Raft.SnapCallback {
-		fn(&util.ErrNotLeader{})
+		fn(&util.ErrStaleCommand{})
 	}
 	rn.Raft.SnapCallback = make([]func(err error), 0)
 }
@@ -213,9 +215,9 @@ func (rn *RawNode) HasReady() bool {
 	if hardSt := r.hardState(); !IsEmptyHardState(hardSt) && !isHardStateEqual(hardSt, rn.prevHardSt) {
 		return true
 	}
-	//if r.RaftLog.hasPendingSnapshot() {
-	//	return true
-	//}
+	if r.RaftLog.HasPendingSnapshot() {
+		return true
+	}
 	if len(r.msgs) > 0 || len(r.RaftLog.unstableEntries()) > 0 || len(r.RaftLog.nextEnts()) > 0 {
 		return true
 	}

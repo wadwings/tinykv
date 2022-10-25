@@ -47,7 +47,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	//log.Infof("%v start HandleRaftReady", d.PeerId())
 	ready := d.RaftGroup.Ready()
 	//log.Infof("%+v", ready)
-	//log.Infof("%+v", ready.Messages)
+	log.Infof("%+v", ready.Messages)
 	if _, err := d.peerStorage.SaveReadyState(&ready); err != nil {
 		return
 	}
@@ -76,15 +76,27 @@ func (d *peerMsgHandler) HandleProposal(entries []eraftpb.Entry) {
 			if d.proposals[i].index == entry.Index && d.proposals[i].term == entry.Term {
 				proposal := d.proposals[i]
 				var request raft_cmdpb.Request
+				var adminRequest raft_cmdpb.AdminRequest
 				if err := request.Unmarshal(entry.Data); err != nil {
-					proposal.cb.Done(ErrResp(err))
+					if err := adminRequest.Unmarshal(entry.Data); err != nil {
+						proposal.cb.Done(ErrResp(err))
+					}
 				}
-				proposal.cb.Done(&raft_cmdpb.RaftCmdResponse{
-					Header: &raft_cmdpb.RaftResponseHeader{},
-					Responses: []*raft_cmdpb.Response{{
-						CmdType: request.CmdType,
-					}},
-				})
+				if request.CmdType != raft_cmdpb.CmdType_Invalid {
+					proposal.cb.Done(&raft_cmdpb.RaftCmdResponse{
+						Header: &raft_cmdpb.RaftResponseHeader{},
+						Responses: []*raft_cmdpb.Response{{
+							CmdType: request.CmdType,
+						}},
+					})
+				} else if adminRequest.CmdType != raft_cmdpb.AdminCmdType_InvalidAdmin {
+					proposal.cb.Done(&raft_cmdpb.RaftCmdResponse{
+						Header: &raft_cmdpb.RaftResponseHeader{},
+						AdminResponse: &raft_cmdpb.AdminResponse{
+							CmdType: adminRequest.CmdType,
+						},
+					})
+				}
 				d.proposals = append(d.proposals[:i], d.proposals[i+1:]...)
 				break
 			}
@@ -179,12 +191,14 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 				cb.Done(response)
 			}
 		case raft_cmdpb.CmdType_Snap:
-			cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
 			d.RaftGroup.RegisterSnapRequest(func(err error) {
 				if err != nil {
+					log.Infof("%s refuse snap request", d.Tag)
 					cb.Done(ErrRespStaleCommand(d.Term()))
 					return
 				}
+				log.Infof("%s propose snap request", d.Tag)
+				cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
 				cb.Done(&raft_cmdpb.RaftCmdResponse{
 					Header: &raft_cmdpb.RaftResponseHeader{},
 					Responses: []*raft_cmdpb.Response{{
@@ -211,10 +225,26 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 				cb.Done(ErrResp(err))
 			}
 		}
-
 	}
 	if msg.AdminRequest != nil {
-		log.Infof("%+v", msg.AdminRequest)
+		adminRequest := msg.AdminRequest
+		switch adminRequest.CmdType {
+		case raft_cmdpb.AdminCmdType_CompactLog:
+			str, _ := adminRequest.Marshal()
+			d.peer.proposals = append(d.peer.proposals, &proposal{
+				term:  d.Term(),
+				index: d.nextProposalIndex(),
+				cb:    cb,
+			})
+			err := d.peer.RaftGroup.Raft.Step(eraftpb.Message{
+				MsgType: eraftpb.MessageType_MsgPropose,
+				To:      d.GetLead(),
+				Entries: []*eraftpb.Entry{{Data: str}},
+			})
+			if err != nil {
+				cb.Done(ErrResp(err))
+			}
+		}
 	}
 }
 

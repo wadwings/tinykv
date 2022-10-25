@@ -342,6 +342,7 @@ func (ps *PeerStorage) Apply(committedEntries []eraftpb.Entry, kvWB *engine_util
 			}
 			switch adminRequest.CmdType {
 			case raft_cmdpb.AdminCmdType_CompactLog:
+				log.Infof("%v Compact Log %+v, entry index: %v", ps.Tag, adminRequest.CompactLog, entry.Index)
 				ps.applyState.TruncatedState.Index = adminRequest.CompactLog.CompactIndex
 				ps.applyState.TruncatedState.Term = adminRequest.CompactLog.CompactTerm
 			}
@@ -356,6 +357,7 @@ func (ps *PeerStorage) Apply(committedEntries []eraftpb.Entry, kvWB *engine_util
 		case raft_cmdpb.CmdType_Delete:
 			{
 				kvWB.DeleteCF(request.Delete.Cf, request.Delete.Key)
+				log.Infof("%v Delete CF %s KEY %s, entry index: %v", ps.Tag, request.Delete.Cf, request.Delete.Key, entry.Index)
 			}
 		}
 	}
@@ -387,16 +389,53 @@ func (ps *PeerStorage) SaveState(raftWB *engine_util.WriteBatch, kvWB *engine_ut
 // Apply the peer with given snapshot
 func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_util.WriteBatch, raftWB *engine_util.WriteBatch) (*ApplySnapResult, error) {
 	log.Infof("%v begin to apply snapshot", ps.Tag)
+	prevRegion := ps.Region()
 	snapData := new(rspb.RaftSnapshotData)
+
+	metaData := snapshot.Metadata
 	if err := snapData.Unmarshal(snapshot.Data); err != nil {
 		return nil, err
 	}
+	//if snapData.Region != nil {
+	//	ps.region = snapData.Region
+	//}
+	ps.raftState.LastIndex = max(ps.raftState.LastIndex, metaData.Index)
+	ps.raftState.LastTerm = max(ps.raftState.LastTerm, metaData.Term)
+	ps.applyState.TruncatedState.Index = max(ps.applyState.TruncatedState.Index, metaData.Index)
+	ps.applyState.TruncatedState.Term = max(ps.applyState.TruncatedState.Term, metaData.Term)
+	//send task to region schedule
+	ch := make(chan bool, 1)
+	ps.snapState = snap.SnapState{
+		StateType: snap.SnapState_Applying,
+	}
+	// schedule snapshot generate task
+	ps.regionSched <- &runner.RegionTaskApply{
+		RegionId: ps.region.GetId(),
+		SnapMeta: metaData,
+		Notifier: ch,
+		StartKey: snapData.Region.GetStartKey(),
+		EndKey:   snapData.Region.GetEndKey(),
+	}
+	select {
+	case <-ch:
+		ps.snapState = snap.SnapState{
+			StateType: snap.SnapState_Relax,
+		}
+	}
+	if err := ps.clearMeta(kvWB, raftWB); err != nil {
+		return nil, err
+	}
 
+	ps.clearExtraData(snapData.Region)
 	// Hint: things need to do here including: update peer storage state like raftState and applyState, etc,
 	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
 	// and ps.clearExtraData to delete stale data
 	// Your Code Here (2C).
-	return nil, nil
+	//TODO I dont know how to deal with "PrevRegion"
+	return &ApplySnapResult{
+		PrevRegion: prevRegion,
+		Region:     ps.region,
+	}, nil
 }
 
 // Save memory states to disk.
@@ -404,8 +443,15 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	var raftWB engine_util.WriteBatch
 	var kvWB engine_util.WriteBatch
+	var applyResult *ApplySnapResult
+	var err error
 	if !raft.IsEmptyHardState(ready.HardState) {
 		ps.raftState.HardState = &ready.HardState
+	}
+	if !raft.IsEmptySnap(&ready.Snapshot) {
+		if applyResult, err = ps.ApplySnapshot(&ready.Snapshot, &kvWB, &raftWB); err != nil {
+			return nil, err
+		}
 	}
 	if err := ps.Append(ready.Entries, &raftWB); err != nil {
 		return nil, err
@@ -413,8 +459,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	if err := ps.Apply(ready.CommittedEntries, &kvWB); err != nil {
 		return nil, err
 	}
-	err := ps.SaveState(&raftWB, &kvWB, ready)
-	if err != nil {
+	if err := ps.SaveState(&raftWB, &kvWB, ready); err != nil {
 		return nil, err
 	}
 
@@ -427,10 +472,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
 
-	return &ApplySnapResult{
-		PrevRegion: ps.region,
-		Region:     ps.region,
-	}, nil
+	return applyResult, nil
 }
 
 func (ps *PeerStorage) ClearData() {
@@ -443,4 +485,11 @@ func (ps *PeerStorage) clearRange(regionID uint64, start, end []byte) {
 		StartKey: start,
 		EndKey:   end,
 	}
+}
+
+func max(a, b uint64) uint64 {
+	if a > b {
+		return a
+	}
+	return b
 }

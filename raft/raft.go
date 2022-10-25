@@ -215,12 +215,17 @@ func randomizedTimeout(tz int) int {
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
 	if r.State == StateLeader {
+		if r.Prs[to].Next < r.RaftLog.GetOffset() {
+			r.sendSnapshot(to)
+			return true
+		}
 		var entries []*pb.Entry
-		logTerm, _ := r.RaftLog.Term(r.Prs[to].Match)
-		index := r.Prs[to].Match
-		for i := r.Prs[to].Match + 1; i < r.Prs[to].Next; i++ {
+		logTerm, _ := r.RaftLog.Term(r.Prs[to].Next - 1)
+		index := r.Prs[to].Next - 1
+		for i := r.Prs[to].Next; i <= r.RaftLog.LastIndex(); i++ {
 			entries = append(entries, r.RaftLog.at(i))
 		}
+		r.deduplicateAppend(to)
 		r.msgs = append(r.msgs, pb.Message{
 			MsgType:              pb.MessageType_MsgAppend,
 			To:                   to,
@@ -239,6 +244,15 @@ func (r *Raft) sendAppend(to uint64) bool {
 		return true
 	}
 	return false
+}
+
+func (r *Raft) deduplicateAppend(to uint64) {
+	for i, msg := range r.msgs {
+		if msg.To == to && msg.MsgType == pb.MessageType_MsgAppend {
+			r.msgs = append(r.msgs[:i], r.msgs[i+1:]...)
+			break
+		}
+	}
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
@@ -357,7 +371,7 @@ func (r *Raft) becomeLeader() {
 		r.State = StateLeader
 	}
 	for _, peer := range r.Prs {
-		peer.Match = r.RaftLog.LastIndex()
+		peer.Match = 0
 		peer.Next = r.RaftLog.LastIndex() + 1
 	}
 	r.Lead = 0
@@ -495,22 +509,27 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 
 func (r *Raft) handleAppendResponse(m pb.Message) {
 	// m.index = r.raftlog.commit + uint64(len(entries))
+	if r.id == m.From {
+		//This is to eliminate response from self-snapshot
+		return
+	}
 	if m.Reject {
 		if m.Term > r.Term || m.Index == r.RaftLog.LastIndex() {
 			//follower have a higher term
 			return
 		} else {
 			//follower have a lower last index
-			if r.Prs[m.From].Match != r.RaftLog.GetOffset()-1 {
-				// debug of double append, it's test-direction
-				r.Prs[m.From].Match = r.Prs[m.From].Match - 1
+			// debug of double append, it's test-direction
+			if r.Prs[m.From].Next > m.Index+1 {
+				r.Prs[m.From].Next = m.Index + 1
+			} else {
+				r.Prs[m.From].Next = r.Prs[m.From].Next - 1
 			}
 			r.sendAppend(m.From)
 		}
-	} else if term, _ := r.RaftLog.Term(m.Index); term == r.Term {
-		if r.Prs[m.From].Match != m.Index {
-			r.Prs[m.From].Match = m.Index
-		}
+	} else if term, _ := r.RaftLog.Term(m.Index); term == r.Term && r.Prs[m.From].Match != m.Index {
+		r.Prs[m.From].Match = m.Index
+		r.Prs[m.From].Next = m.Index + 1
 		r.checkCommit()
 	}
 }
@@ -581,6 +600,9 @@ func (r *Raft) checkLeaderLease() {
 }
 
 func (r *Raft) HandleSnapRequest() {
+	if r.RaftLog.committed != r.RaftLog.LastIndex() {
+		return
+	}
 	for _, fn := range r.SnapCallback {
 		fn(nil)
 	}
@@ -608,9 +630,7 @@ func (r *Raft) handlePropose(m pb.Message) {
 	}
 	r.RaftLog.Append(ents)
 	r.Prs[r.id].Match = r.RaftLog.LastIndex()
-	for _, value := range r.Prs {
-		value.Next = r.RaftLog.LastIndex() + 1
-	}
+	r.Prs[r.id].Next = r.RaftLog.LastIndex() + 1
 	r.bcastMsg(pb.MessageType_MsgAppend)
 	r.checkCommit()
 }
@@ -744,21 +764,31 @@ func (r *Raft) sendSnapshot(to uint64) {
 	})
 }
 func (r *Raft) handleSnapshot(m pb.Message) {
-	reject := false
-	if m.Term < r.Term {
-		//follower have a higher term
-		reject = true
+	if m.From != m.To {
+		log.Warnf("%v receive snapshot message %+v", r.id, m)
 	}
-	if m.Term == r.Term && m.From == r.Lead {
-		r.electionElapsed = 0
+	if r.Term > m.Term || m.Snapshot == nil {
+		r.msgs = append(r.msgs, pb.Message{
+			MsgType: pb.MessageType_MsgAppendResponse,
+			From:    r.id,
+			To:      m.From,
+			Term:    r.Term,
+			Index:   r.RaftLog.LastIndex(),
+			Reject:  true,
+		})
+		return
 	}
-	if m.Term > r.Term || m.Term == r.Term && r.Lead != m.From {
-		//leadership transfer happen
-		r.becomeFollower(m.Term, m.From)
+	r.RaftLog.ApplySnapshot(m.Snapshot)
+	r.RaftLog.pendingSnapshot = m.Snapshot
+	r.Prs = make(map[uint64]*Progress, 0)
+	for _, id := range m.Snapshot.Metadata.ConfState.Nodes {
+		r.Prs[id] = &Progress{
+			Match: 0,
+			Next:  r.RaftLog.LastIndex() + 1,
+		}
 	}
-	if !reject && m.Snapshot != nil {
-		r.RaftLog.ApplySnapshot(m.Snapshot)
-	}
+	r.Term = m.Term
+	r.Lead = m.From
 	m.MsgType = pb.MessageType_MsgAppend
 	r.Step(m)
 	// Your Code Here (2C).
