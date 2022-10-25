@@ -189,6 +189,11 @@ func (rn *RawNode) Ready() Ready {
 
 func (rn *RawNode) RegisterSnapRequest(fn func(err error)) {
 	rn.Raft.SnapCallback = append(rn.Raft.SnapCallback, fn)
+	//only trust leader detect happened after request
+	rn.Raft.leaderLeaseElapsed = 0
+	for key := range rn.Raft.alives {
+		rn.Raft.alives[key] = false
+	}
 }
 
 func (rn *RawNode) EmptySnapRequest() {

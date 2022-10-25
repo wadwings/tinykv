@@ -17,6 +17,7 @@ package raft
 import (
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pkg/errors"
+	"time"
 )
 
 // RaftLog manage the log entries, its struct look like:
@@ -55,7 +56,6 @@ type RaftLog struct {
 	// Your Data Here (2A).
 
 	//firstIndex
-	offset uint64
 }
 
 // newLog returns log using the given storage. It recovers the log
@@ -72,7 +72,6 @@ func newLog(storage Storage) *RaftLog {
 		applied:   firstIndex - 1,
 		stabled:   lastIndex,
 		entries:   entries,
-		offset:    firstIndex,
 		committed: hardState.Commit,
 	}
 }
@@ -88,7 +87,7 @@ func (l *RaftLog) at(index uint64) *pb.Entry {
 	if len(l.entries) == 0 || index > l.LastIndex() {
 		return &pb.Entry{}
 	}
-	return &l.entries[index-l.offset]
+	return &l.entries[index-l.GetOffset()]
 }
 
 // unstableEntries return all the unstable entries
@@ -96,7 +95,7 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 	if len(l.entries) == 0 {
 		return nil
 	}
-	return l.entries[l.stabled-l.offset+1 : l.LastIndex()-l.offset+1]
+	return l.entries[l.stabled-l.GetOffset()+1 : l.LastIndex()-l.GetOffset()+1]
 }
 
 // nextEnts returns all the committed but not applied entries
@@ -104,20 +103,20 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	if len(l.entries) == 0 {
 		return nil
 	}
-	return l.entries[l.applied-l.offset+1 : l.committed-l.offset+1]
+	return l.entries[l.applied-l.GetOffset()+1 : l.committed-l.GetOffset()+1]
 }
 
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	if len(l.entries) == 0 {
-		return l.offset - 1
+		return l.GetOffset() - 1
 	}
 	return l.entries[len(l.entries)-1].Index
 }
 
 func (l *RaftLog) NextIndex() uint64 {
 	if len(l.entries) == 0 {
-		return l.offset
+		return l.GetOffset()
 	} else {
 		return l.LastIndex() + 1
 	}
@@ -125,7 +124,7 @@ func (l *RaftLog) NextIndex() uint64 {
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
-	if i < l.offset || i > l.LastIndex() {
+	if i < l.GetOffset() || i > l.LastIndex() {
 		return 0, errors.New("read uninitialized address buffer")
 	}
 	return l.at(i).Term, nil
@@ -172,5 +171,49 @@ func (l *RaftLog) IndexCheck() {
 	if l.stabled > l.LastIndex() {
 		panic("")
 	}
+}
 
+func (l *RaftLog) GetSnapshot() (*pb.Snapshot, error) {
+	var snapshot pb.Snapshot
+	var err error
+	for tryCount := 1; tryCount != 10; tryCount++ {
+		snapshot, err = l.storage.Snapshot()
+		if err != nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+	}
+	return &snapshot, err
+}
+
+func (l *RaftLog) ApplySnapshot(snapshot *pb.Snapshot) {
+	snapIndex := snapshot.Metadata.Index
+	snapTerm := snapshot.Metadata.Term
+	l.truncateEntries(snapTerm, snapIndex)
+	l.pendingSnapshot = snapshot
+	l.IndexCheck()
+}
+
+func (l *RaftLog) GetOffset() uint64 {
+	offset, _ := l.storage.FirstIndex()
+	if len(l.entries) != 0 {
+		if offset > l.entries[0].Index {
+			//storage FirstIndex == truncated Index, means GC happened
+			truncatedTerm, _ := l.storage.Term(offset)
+			l.truncateEntries(truncatedTerm, offset)
+		}
+		offset = l.entries[0].Index
+	}
+	return offset
+}
+
+func (l *RaftLog) truncateEntries(term uint64, index uint64) {
+	if index < l.LastIndex() && len(l.entries) != 0 && index+1 > l.entries[0].Index {
+		l.entries = append([]pb.Entry{{Term: term, Index: index}}, l.entries[index-l.entries[0].Index+1:]...)
+	} else {
+		l.entries = []pb.Entry{{Term: term, Index: index}}
+	}
+	l.stabled = max(l.stabled, index)
+	l.applied = max(l.applied, index)
+	l.committed = max(l.committed, index)
 }

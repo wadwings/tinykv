@@ -471,7 +471,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		if len(m.Entries) != 0 {
 			//If an existing entry conflicts with a new one (same index but different terms),
 			//delete the existing entry and all that follow it; append any new entries not already in the log.
-			r.RaftLog.entries = r.RaftLog.entries[0 : m.Index-r.RaftLog.offset+1]
+			r.RaftLog.entries = r.RaftLog.entries[0 : m.Index-r.RaftLog.GetOffset()+1]
 			r.RaftLog.stabled = min(r.RaftLog.stabled, r.RaftLog.LastIndex())
 			r.RaftLog.Append(m.Entries)
 			// Now we match newer entry
@@ -501,7 +501,7 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 			return
 		} else {
 			//follower have a lower last index
-			if r.Prs[m.From].Match != r.RaftLog.offset-1 {
+			if r.Prs[m.From].Match != r.RaftLog.GetOffset()-1 {
 				// debug of double append, it's test-direction
 				r.Prs[m.From].Match = r.Prs[m.From].Match - 1
 			}
@@ -720,7 +720,47 @@ func (r *Raft) checkCommit() {
 }
 
 // handleSnapshot handle Snapshot RPC request
+
+func (r *Raft) sendSnapshot(to uint64) {
+	snapshot, _ := r.RaftLog.GetSnapshot()
+	var entries []*pb.Entry
+	for i, entry := range r.RaftLog.entries {
+		if i == 0 {
+			continue
+		}
+		entries = append(entries, &entry)
+	}
+	term, _ := r.RaftLog.Term(r.RaftLog.GetOffset())
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType:  pb.MessageType_MsgSnapshot,
+		From:     r.id,
+		To:       to,
+		Entries:  entries,
+		Snapshot: snapshot,
+		Index:    r.RaftLog.GetOffset(),
+		Term:     r.Term,
+		LogTerm:  term,
+		Commit:   r.RaftLog.committed,
+	})
+}
 func (r *Raft) handleSnapshot(m pb.Message) {
+	reject := false
+	if m.Term < r.Term {
+		//follower have a higher term
+		reject = true
+	}
+	if m.Term == r.Term && m.From == r.Lead {
+		r.electionElapsed = 0
+	}
+	if m.Term > r.Term || m.Term == r.Term && r.Lead != m.From {
+		//leadership transfer happen
+		r.becomeFollower(m.Term, m.From)
+	}
+	if !reject && m.Snapshot != nil {
+		r.RaftLog.ApplySnapshot(m.Snapshot)
+	}
+	m.MsgType = pb.MessageType_MsgAppend
+	r.Step(m)
 	// Your Code Here (2C).
 }
 
