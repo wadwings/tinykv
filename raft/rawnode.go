@@ -183,6 +183,7 @@ func (rn *RawNode) Ready() Ready {
 	}
 	if r.RaftLog.HasPendingSnapshot() {
 		rd.Snapshot = *r.RaftLog.pendingSnapshot
+		r.RaftLog.pendingSnapshot = nil
 	}
 	//log.Infof("peer ID: %v \n Ready: %+v", r.id, rd)
 	return rd

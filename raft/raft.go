@@ -177,7 +177,6 @@ func newRaft(c *Config) *Raft {
 	if raftLog == nil {
 		return nil
 	}
-	raftLog.applied = c.Applied
 	prs := make(map[uint64]*Progress)
 	for _, v := range c.peers {
 		prs[v] = &Progress{
@@ -248,7 +247,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 
 func (r *Raft) deduplicateAppend(to uint64) {
 	for i, msg := range r.msgs {
-		if msg.To == to && msg.MsgType == pb.MessageType_MsgAppend {
+		if msg.To == to && (msg.MsgType == pb.MessageType_MsgAppend || msg.MsgType == pb.MessageType_MsgSnapshot) {
 			r.msgs = append(r.msgs[:i], r.msgs[i+1:]...)
 			break
 		}
@@ -406,6 +405,8 @@ func (r *Raft) Step(m pb.Message) error {
 				r.handleRequestVote(m)
 			case pb.MessageType_MsgHup:
 				r.handleHup(m)
+			case pb.MessageType_MsgSnapshot:
+				r.handleSnapshot(m)
 			}
 		}
 	case StateCandidate:
@@ -421,6 +422,8 @@ func (r *Raft) Step(m pb.Message) error {
 				r.handleRequestVote(m)
 			case pb.MessageType_MsgRequestVoteResponse:
 				r.handleRequestVoteRes(m)
+			case pb.MessageType_MsgSnapshot:
+				r.handleSnapshot(m)
 			}
 		}
 	case StateLeader:
@@ -438,6 +441,8 @@ func (r *Raft) Step(m pb.Message) error {
 				r.handleAppendResponse(m)
 			case pb.MessageType_MsgHeartbeatResponse:
 				r.handleHeartBeatResponse(m)
+			case pb.MessageType_MsgSnapshot:
+				r.handleSnapshot(m)
 			}
 		}
 	}
@@ -539,7 +544,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
 	reject := false
 
-	if m.Term > r.Term {
+	if m.Term > r.Term || m.Term == r.Term && r.State != StateLeader {
 		r.becomeFollower(m.Term, m.From)
 	}
 	if m.Term == r.Term && r.Lead == m.From {
@@ -570,8 +575,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 
 func (r *Raft) handleHeartBeatResponse(m pb.Message) {
 	if m.Reject == true {
-		m.MsgType = pb.MessageType_MsgAppendResponse
-		r.handleAppendResponse(m)
+		r.sendAppend(m.From)
 	}
 	if m.Term == r.Term {
 		r.alives[m.From] = true
@@ -742,27 +746,42 @@ func (r *Raft) checkCommit() {
 // handleSnapshot handle Snapshot RPC request
 
 func (r *Raft) sendSnapshot(to uint64) {
-	snapshot, _ := r.RaftLog.GetSnapshot()
 	var entries []*pb.Entry
-	for i, entry := range r.RaftLog.entries {
-		if i == 0 {
-			continue
-		}
-		entries = append(entries, &entry)
+	if r.alreadySendSnapshot(to) {
+		return
 	}
-	term, _ := r.RaftLog.Term(r.RaftLog.GetOffset())
+	snapshot, err := r.RaftLog.GetSnapshot()
+	for i := max(snapshot.Metadata.Index, r.RaftLog.entries[0].Index) + 1; i < r.RaftLog.LastIndex(); i++ {
+		// We skip snapshot entry
+		entry := r.RaftLog.at(i)
+		entries = append(entries, entry)
+	}
+	if err != nil {
+		log.Fatalf("snapshot generate fail! reason: %v", err)
+	}
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType:  pb.MessageType_MsgSnapshot,
 		From:     r.id,
 		To:       to,
-		Entries:  entries,
-		Snapshot: snapshot,
-		Index:    r.RaftLog.GetOffset(),
 		Term:     r.Term,
-		LogTerm:  term,
 		Commit:   r.RaftLog.committed,
+		LogTerm:  snapshot.Metadata.Term,
+		Index:    snapshot.Metadata.Index,
+		Snapshot: snapshot,
+		Entries:  entries,
 	})
+	log.Warnf("%v send snapshot message %+v", r.id, r.msgs[len(r.msgs)-1])
 }
+
+func (r *Raft) alreadySendSnapshot(to uint64) bool {
+	for _, msg := range r.msgs {
+		if msg.To == to && msg.MsgType == pb.MessageType_MsgSnapshot {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Raft) handleSnapshot(m pb.Message) {
 	if m.From != m.To {
 		log.Warnf("%v receive snapshot message %+v", r.id, m)
@@ -779,7 +798,6 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 		return
 	}
 	r.RaftLog.ApplySnapshot(m.Snapshot)
-	r.RaftLog.pendingSnapshot = m.Snapshot
 	r.Prs = make(map[uint64]*Progress, 0)
 	for _, id := range m.Snapshot.Metadata.ConfState.Nodes {
 		r.Prs[id] = &Progress{

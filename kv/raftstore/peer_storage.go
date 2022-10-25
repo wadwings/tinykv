@@ -401,8 +401,10 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	//}
 	ps.raftState.LastIndex = max(ps.raftState.LastIndex, metaData.Index)
 	ps.raftState.LastTerm = max(ps.raftState.LastTerm, metaData.Term)
+	ps.applyState.AppliedIndex = max(ps.applyState.AppliedIndex, metaData.Index)
 	ps.applyState.TruncatedState.Index = max(ps.applyState.TruncatedState.Index, metaData.Index)
 	ps.applyState.TruncatedState.Term = max(ps.applyState.TruncatedState.Term, metaData.Term)
+
 	//send task to region schedule
 	ch := make(chan bool, 1)
 	ps.snapState = snap.SnapState{

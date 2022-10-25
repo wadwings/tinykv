@@ -81,13 +81,19 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+	offset, _ := l.storage.FirstIndex()
+	if len(l.entries) != 0 && offset > l.entries[0].Index+1 {
+		term := l.entries[offset-1-l.entries[0].Index].Term
+		l.truncateEntries(term, offset-1)
+	}
 }
 
 func (l *RaftLog) at(index uint64) *pb.Entry {
 	if len(l.entries) == 0 || index > l.LastIndex() {
 		return &pb.Entry{}
 	}
-	return &l.entries[index-l.GetOffset()]
+	entry := l.entries[index-l.GetOffset()]
+	return &entry
 }
 
 // unstableEntries return all the unstable entries
@@ -196,13 +202,14 @@ func (l *RaftLog) ApplySnapshot(snapshot *pb.Snapshot) {
 }
 
 func (l *RaftLog) GetOffset() uint64 {
-	offset, _ := l.storage.FirstIndex()
+	offset, err := l.storage.FirstIndex()
+	if err != nil {
+		return 0
+	}
+	//l.entries[0] is snapshot entry, so offset need oversize than l.entries[0].index + 1 then we shall
+	//there is a snapshot needed to be handled
 	if len(l.entries) != 0 {
-		if offset > l.entries[0].Index {
-			//storage FirstIndex == truncated Index, means GC happened
-			truncatedTerm, _ := l.storage.Term(offset)
-			l.truncateEntries(truncatedTerm, offset)
-		}
+		l.maybeCompact()
 		offset = l.entries[0].Index
 	}
 	return offset

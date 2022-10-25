@@ -90,6 +90,10 @@ func (d *peerMsgHandler) HandleProposal(entries []eraftpb.Entry) {
 						}},
 					})
 				} else if adminRequest.CmdType != raft_cmdpb.AdminCmdType_InvalidAdmin {
+					switch adminRequest.CmdType {
+					case raft_cmdpb.AdminCmdType_CompactLog:
+						d.ScheduleCompactLog(adminRequest.CompactLog.CompactIndex)
+					}
 					proposal.cb.Done(&raft_cmdpb.RaftCmdResponse{
 						Header: &raft_cmdpb.RaftResponseHeader{},
 						AdminResponse: &raft_cmdpb.AdminResponse{
