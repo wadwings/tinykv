@@ -264,7 +264,7 @@ func (r *Raft) sendHeartbeat(to uint64) {
 			From:                 r.id,
 			Term:                 r.Term,
 			LogTerm:              0,
-			Index:                0,
+			Index:                r.Prs[to].Match,
 			Entries:              nil,
 			Commit:               r.RaftLog.committed,
 			Snapshot:             nil,
@@ -349,6 +349,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.State = StateFollower
 	r.Term = term
 	r.Lead = lead
+	r.Vote = lead
 }
 
 // becomeCandidate transform this peer's state to candidate
@@ -393,6 +394,9 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
+	if m.Term > r.Term {
+		r.becomeFollower(m.Term, None)
+	}
 	switch r.State {
 	case StateFollower:
 		{
@@ -553,10 +557,8 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 			reject = true
 		} else {
 			//TODO
-			if r.RaftLog.committed < m.Commit {
-				r.RaftLog.committed = m.Commit
-				r.RaftLog.IndexCheck()
-			}
+			r.RaftLog.committed = max(r.RaftLog.committed, min(m.Index, m.Commit))
+			r.RaftLog.IndexCheck()
 		}
 		r.electionElapsed = 0
 	} else {
@@ -651,11 +653,8 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 		logTerm == m.LogTerm && lastIndex > m.Index ||
 		r.Term == m.Term && (r.Vote != None && r.Vote != m.From)
 
-	if m.Term > r.Term {
-		r.becomeFollower(m.Term, None)
-		if !reject {
-			r.Vote = m.From
-		}
+	if !reject {
+		r.Vote = m.From
 	}
 
 	r.msgs = append(r.msgs, pb.Message{

@@ -1605,7 +1605,7 @@ func newNetworkWithConfig(configFunc func(*Config), peers ...stateMachine) *netw
 
 func (nw *network) send(msgs ...pb.Message) {
 	for len(msgs) > 0 {
-		log.Infof("%v", msgs[0])
+		log.Infof("%+v", msgs[0])
 		m := msgs[0]
 		p := nw.peers[m.To]
 		p.Step(m)
