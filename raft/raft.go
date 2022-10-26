@@ -156,7 +156,8 @@ type Raft struct {
 	// (https://web.stanford.edu/~ouster/cgi-bin/papers/OngaroPhD.pdf)
 	// (Used in 3A leader transfer)
 	leadTransferee uint64
-
+	// this indicate whether a transfer process is on going
+	pendingTrans bool
 	// Only one conf change may be pending (in the log, but not yet
 	// applied) at a time. This is enforced via PendingConfIndex, which
 	// is set to a value >= the log index of the latest pending
@@ -366,7 +367,7 @@ func (r *Raft) becomeCandidate() {
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
 	log.Warnf("%v now is Leader!", r.id)
-
+	r.pendingTrans = false
 	if r.State == StateCandidate {
 		r.State = StateLeader
 	}
@@ -374,7 +375,7 @@ func (r *Raft) becomeLeader() {
 		peer.Match = 0
 		peer.Next = r.RaftLog.LastIndex() + 1
 	}
-	r.Lead = 0
+	r.Lead = r.id
 	r.leaderLeaseElapsed = 0
 	r.Step(pb.Message{
 		MsgType: pb.MessageType_MsgPropose,
@@ -394,6 +395,9 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
+	if !r.checkAlive(m) {
+		return nil
+	}
 	if m.Term > r.Term {
 		r.becomeFollower(m.Term, None)
 	}
@@ -411,6 +415,10 @@ func (r *Raft) Step(m pb.Message) error {
 				r.handleHup(m)
 			case pb.MessageType_MsgSnapshot:
 				r.handleSnapshot(m)
+			case pb.MessageType_MsgTimeoutNow:
+				r.handleTimeoutNow(m)
+			case pb.MessageType_MsgTransferLeader:
+				r.handleTransferLeader(m)
 			}
 		}
 	case StateCandidate:
@@ -428,6 +436,10 @@ func (r *Raft) Step(m pb.Message) error {
 				r.handleRequestVoteRes(m)
 			case pb.MessageType_MsgSnapshot:
 				r.handleSnapshot(m)
+			case pb.MessageType_MsgTimeoutNow:
+				r.handleTimeoutNow(m)
+			case pb.MessageType_MsgTransferLeader:
+				r.handleTransferLeader(m)
 			}
 		}
 	case StateLeader:
@@ -447,6 +459,8 @@ func (r *Raft) Step(m pb.Message) error {
 				r.handleHeartBeatResponse(m)
 			case pb.MessageType_MsgSnapshot:
 				r.handleSnapshot(m)
+			case pb.MessageType_MsgTransferLeader:
+				r.handleTransferLeader(m)
 			}
 		}
 	}
@@ -539,6 +553,7 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	} else if term, _ := r.RaftLog.Term(m.Index); term == r.Term && r.Prs[m.From].Match != m.Index {
 		r.Prs[m.From].Match = m.Index
 		r.Prs[m.From].Next = m.Index + 1
+		r.checkTransferQualified()
 		r.checkCommit()
 	}
 }
@@ -630,9 +645,13 @@ func (r *Raft) countLeaderLease() {
 }
 
 func (r *Raft) handlePropose(m pb.Message) {
+	if r.pendingTrans {
+		log.Infof("leader %d is in transfer process, abort propose", r.id)
+		return
+	}
 	var ents []*pb.Entry
 	for _, entry := range m.Entries {
-		ents = append(ents, &pb.Entry{Data: entry.Data, Term: r.Term})
+		ents = append(ents, &pb.Entry{EntryType: entry.EntryType, Data: entry.Data, Term: r.Term})
 	}
 	r.RaftLog.Append(ents)
 	r.Prs[r.id].Match = r.RaftLog.LastIndex()
@@ -811,13 +830,72 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
 }
 
+func (r *Raft) checkTransferQualified() {
+	if r.leadTransferee == None {
+		return
+	}
+	if r.Prs[r.leadTransferee].Match != r.RaftLog.LastIndex() {
+		//transfer target is not qualified, send append to makes it qualified.
+		r.sendAppend(r.leadTransferee)
+	} else {
+		//transfer target is qualified, send timeout now message to start a new election
+		r.sendTimeoutNow()
+	}
+}
+
+func (r *Raft) handleTransferLeader(m pb.Message) {
+	if r.State == StateLeader {
+		if _, ok := r.Prs[m.From]; !ok || m.From == r.id {
+			return
+		}
+		r.leadTransferee = m.From
+		r.pendingTrans = true
+		r.checkTransferQualified()
+	} else {
+		r.sendTransferLeader()
+	}
+
+}
+
+func (r *Raft) sendTransferLeader() {
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType: pb.MessageType_MsgTransferLeader,
+		From:    r.id,
+		To:      r.Lead,
+	})
+}
+
+func (r *Raft) sendTimeoutNow() {
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType: pb.MessageType_MsgTimeoutNow,
+		From:    r.id,
+		To:      r.leadTransferee,
+	})
+	//finishing transfer process
+	r.leadTransferee = None
+}
+
+func (r *Raft) handleTimeoutNow(m pb.Message) {
+	r.Step(pb.Message{
+		MsgType: pb.MessageType_MsgHup,
+		From:    m.From,
+		To:      r.id,
+	})
+}
+
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
+	r.Prs[id] = &Progress{
+		Match: 0,
+		Next:  r.RaftLog.LastIndex() + 1,
+	}
 	// Your Code Here (3A).
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
+	delete(r.Prs, id)
+	r.checkCommit()
 	// Your Code Here (3A).
 }
 
@@ -834,4 +912,11 @@ func (r *Raft) hardState() pb.HardState {
 		Vote:   r.Vote,
 		Commit: r.RaftLog.committed,
 	}
+}
+
+func (r *Raft) checkAlive(m pb.Message) bool {
+	if _, ok := r.Prs[r.id]; !ok {
+		return false
+	}
+	return true
 }
