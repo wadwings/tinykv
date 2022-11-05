@@ -395,9 +395,7 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-	if !r.checkAlive(m) {
-		return nil
-	}
+	//log.Infof("%d receive message %+v", r.id, m)
 	if m.Term > r.Term {
 		r.becomeFollower(m.Term, None)
 	}
@@ -638,7 +636,7 @@ func (r *Raft) countLeaderLease() {
 		r.alives[i] = false
 	}
 	r.leaderLeaseElapsed++
-	if r.leaderLeaseElapsed > 3 {
+	if r.leaderLeaseElapsed > 10 {
 		log.Warnf("%d fallback to follower!", r.id)
 		r.becomeFollower(r.Term, 0)
 	}
@@ -876,6 +874,9 @@ func (r *Raft) sendTimeoutNow() {
 }
 
 func (r *Raft) handleTimeoutNow(m pb.Message) {
+	if _, alive := r.Prs[r.id]; !alive {
+		return
+	}
 	r.Step(pb.Message{
 		MsgType: pb.MessageType_MsgHup,
 		From:    m.From,
@@ -885,16 +886,45 @@ func (r *Raft) handleTimeoutNow(m pb.Message) {
 
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
+	if _, exist := r.Prs[id]; exist {
+		return
+	}
+	log.Warnf("%d add %d in its peers list", r.id, id)
 	r.Prs[id] = &Progress{
 		Match: 0,
 		Next:  r.RaftLog.LastIndex() + 1,
+	}
+	r.alives[id] = false
+	r.votes[id] = false
+	if r.State == StateLeader {
+		r.msgs = append(r.msgs, pb.Message{
+			MsgType:              pb.MessageType_MsgHeartbeat,
+			To:                   id,
+			From:                 r.id,
+			Term:                 r.Term,
+			LogTerm:              0,
+			Index:                r.Prs[id].Match,
+			Entries:              nil,
+			Commit:               0,
+			Snapshot:             nil,
+			Reject:               false,
+			XXX_NoUnkeyedLiteral: struct{}{},
+			XXX_unrecognized:     nil,
+			XXX_sizecache:        0,
+		})
 	}
 	// Your Code Here (3A).
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
+	if _, exist := r.Prs[id]; !exist {
+		return
+	}
+	log.Warnf("%d remove %d in its peers list", r.id, id)
 	delete(r.Prs, id)
+	delete(r.alives, id)
+	delete(r.votes, id)
 	r.checkCommit()
 	// Your Code Here (3A).
 }
@@ -912,11 +942,4 @@ func (r *Raft) hardState() pb.HardState {
 		Vote:   r.Vote,
 		Commit: r.RaftLog.committed,
 	}
-}
-
-func (r *Raft) checkAlive(m pb.Message) bool {
-	if _, ok := r.Prs[r.id]; !ok {
-		return false
-	}
-	return true
 }

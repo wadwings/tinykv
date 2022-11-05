@@ -49,6 +49,8 @@ type PeerStorage struct {
 	Engines *engine_util.Engines
 	// Tag used for logging
 	Tag string
+	//PendingCC are ConfChange needed to be evaluated in rawNode
+	PendingCC []*eraftpb.ConfChange
 }
 
 // NewPeerStorage get the persist raftState from engines and return a peer storage
@@ -331,6 +333,28 @@ func (ps *PeerStorage) Apply(committedEntries []eraftpb.Entry, kvWB *engine_util
 		return nil
 	}
 	for _, entry := range committedEntries {
+		if entry.EntryType == eraftpb.EntryType_EntryConfChange {
+			var cc eraftpb.ConfChange
+			_ = cc.Unmarshal(entry.Data)
+			// when conf change happen, confver increase
+			// update peer information in region
+			if cc.ChangeType == eraftpb.ConfChangeType_AddNode && !ps.PeerIDExists(cc.NodeId) {
+				ps.region.RegionEpoch.ConfVer++
+				var peer metapb.Peer
+				_ = peer.Unmarshal(cc.Context)
+				ps.region.Peers = append(ps.region.Peers, &peer)
+			} else if cc.ChangeType == eraftpb.ConfChangeType_RemoveNode && ps.PeerIDExists(cc.NodeId) {
+				ps.region.RegionEpoch.ConfVer++
+				for i, peer := range ps.region.Peers {
+					if peer.Id == cc.NodeId {
+						ps.region.Peers = append(ps.region.Peers[:i], ps.region.Peers[i+1:]...)
+						break
+					}
+				}
+			}
+			ps.PendingCC = append(ps.PendingCC, &cc)
+			continue
+		}
 		var request raft_cmdpb.Request
 		if entry.Data == nil {
 			continue
@@ -396,9 +420,9 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	if err := snapData.Unmarshal(snapshot.Data); err != nil {
 		return nil, err
 	}
-	//if snapData.Region != nil {
-	//	ps.region = snapData.Region
-	//}
+	if snapData.Region != nil {
+		ps.region = snapData.Region
+	}
 	ps.raftState.LastIndex = max(ps.raftState.LastIndex, metaData.Index)
 	ps.raftState.LastTerm = max(ps.raftState.LastTerm, metaData.Term)
 	ps.applyState.AppliedIndex = max(ps.applyState.AppliedIndex, metaData.Index)
@@ -487,6 +511,15 @@ func (ps *PeerStorage) clearRange(regionID uint64, start, end []byte) {
 		StartKey: start,
 		EndKey:   end,
 	}
+}
+
+func (ps *PeerStorage) PeerIDExists(peerID uint64) bool {
+	for _, peer := range ps.region.Peers {
+		if peer.Id == peerID {
+			return true
+		}
+	}
+	return false
 }
 
 func max(a, b uint64) uint64 {
