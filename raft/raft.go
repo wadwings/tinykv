@@ -186,6 +186,9 @@ func newRaft(c *Config) *Raft {
 		}
 	}
 	hardState, _, err := c.Storage.InitialState()
+	if c.Applied != 0 {
+		raftLog.applied = c.Applied // TODO
+	}
 	if err != nil {
 		return nil
 	}
@@ -337,6 +340,7 @@ func (r *Raft) tick() {
 			r.electionElapsed = 0
 			r.electionTimeout = randomizedTimeout(r.electionBaseline)
 			r.bcastMsg(pb.MessageType_MsgRequestVote)
+			r.checkVoteResult()
 		}
 	}
 }
@@ -925,6 +929,7 @@ func (r *Raft) removeNode(id uint64) {
 	delete(r.Prs, id)
 	delete(r.alives, id)
 	delete(r.votes, id)
+	log.Warnf("%d current raft peers %v", r.id, r.Prs)
 	r.checkCommit()
 	// Your Code Here (3A).
 }

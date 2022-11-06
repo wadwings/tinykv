@@ -340,11 +340,13 @@ func (ps *PeerStorage) Apply(committedEntries []eraftpb.Entry, kvWB *engine_util
 			// update peer information in region
 			if cc.ChangeType == eraftpb.ConfChangeType_AddNode && !ps.PeerIDExists(cc.NodeId) {
 				ps.region.RegionEpoch.ConfVer++
+				log.Warnf("%v current region epoch %+v", ps.Tag, ps.region.RegionEpoch)
 				var peer metapb.Peer
 				_ = peer.Unmarshal(cc.Context)
 				ps.region.Peers = append(ps.region.Peers, &peer)
 			} else if cc.ChangeType == eraftpb.ConfChangeType_RemoveNode && ps.PeerIDExists(cc.NodeId) {
 				ps.region.RegionEpoch.ConfVer++
+				log.Warnf("%v current region epoch %+v", ps.Tag, ps.region.RegionEpoch)
 				for i, peer := range ps.region.Peers {
 					if peer.Id == cc.NodeId {
 						ps.region.Peers = append(ps.region.Peers[:i], ps.region.Peers[i+1:]...)

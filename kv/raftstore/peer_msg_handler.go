@@ -79,6 +79,7 @@ func (d *peerMsgHandler) handlePendingCC() {
 		}
 		d.RaftGroup.ApplyConfChange(*cc)
 	}
+
 	d.updateStoreMeta()
 	d.peerStorage.PendingCC = []*eraftpb.ConfChange{}
 }
@@ -86,6 +87,8 @@ func (d *peerMsgHandler) handlePendingCC() {
 func (d *peerMsgHandler) updateStoreMeta() {
 	d.ctx.storeMeta.regions[d.regionId] = d.Region()
 	d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
+	log.Warnf("%v current peers %+v", d.Tag, d.Region().Peers)
+	log.Warnf("%v current region Epoch %+v", d.Tag, d.Region().RegionEpoch)
 }
 
 func (d *peerMsgHandler) HandleNotLeaderProposal() {

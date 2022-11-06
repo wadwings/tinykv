@@ -16,7 +16,6 @@ package raft
 
 import (
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
-	"github.com/pkg/errors"
 	"time"
 )
 
@@ -131,7 +130,8 @@ func (l *RaftLog) NextIndex() uint64 {
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	if i < l.GetOffset() || i > l.LastIndex() {
-		return 0, errors.New("read uninitialized address buffer")
+		// maybe a break change
+		return l.storage.Term(i)
 	}
 	return l.at(i).Term, nil
 }
