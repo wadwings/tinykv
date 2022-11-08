@@ -2,6 +2,7 @@ package raftstore
 
 import (
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/raft"
@@ -109,8 +110,6 @@ func (d *peerMsgHandler) HandleProposal(entries []eraftpb.Entry) {
 			if d.proposals[i].index == entry.Index && d.proposals[i].term == entry.Term {
 				proposal := d.proposals[i]
 				if entry.EntryType == eraftpb.EntryType_EntryConfChange {
-					d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
-					d.ctx.storeMeta.regions[d.regionId] = d.Region()
 					proposal.cb.Done(&raft_cmdpb.RaftCmdResponse{
 						Header: &raft_cmdpb.RaftResponseHeader{},
 						AdminResponse: &raft_cmdpb.AdminResponse{
@@ -122,8 +121,8 @@ func (d *peerMsgHandler) HandleProposal(entries []eraftpb.Entry) {
 				}
 				var request raft_cmdpb.Request
 				var adminRequest raft_cmdpb.AdminRequest
-				if err := request.Unmarshal(entry.Data); err != nil {
-					if err := adminRequest.Unmarshal(entry.Data); err != nil {
+				if err := adminRequest.Unmarshal(entry.Data); err != nil {
+					if err := request.Unmarshal(entry.Data); err != nil {
 						proposal.cb.Done(ErrResp(err))
 					}
 				}
@@ -139,43 +138,63 @@ func (d *peerMsgHandler) HandleProposal(entries []eraftpb.Entry) {
 					case raft_cmdpb.AdminCmdType_CompactLog:
 						d.ScheduleCompactLog(adminRequest.CompactLog.CompactIndex)
 					case raft_cmdpb.AdminCmdType_Split:
+						split := adminRequest.Split
+						//TODO multiple same Split Request
+						if d.ctx.storeMeta.regionRanges.Delete(&regionItem{region: d.Region()}) == nil {
+							return
+						}
 						d.Region().RegionEpoch = &metapb.RegionEpoch{
 							ConfVer: d.Region().RegionEpoch.ConfVer,
 							Version: d.Region().RegionEpoch.Version + 1,
 						}
 						var peers []*metapb.Peer
-						for i, peerID := range adminRequest.Split.NewPeerIds {
+						for i, peerID := range split.NewPeerIds {
 							peers = append(peers, &metapb.Peer{
 								Id:      peerID,
-								StoreId: uint64(i + 1),
+								StoreId: d.Region().Peers[i].StoreId,
 							})
 						}
 						newRegion := &metapb.Region{
-							StartKey: adminRequest.Split.SplitKey,
+							StartKey: split.SplitKey,
 							EndKey:   d.Region().EndKey,
-							Id:       adminRequest.Split.NewRegionId,
+							Id:       split.NewRegionId,
 							RegionEpoch: &metapb.RegionEpoch{
 								ConfVer: d.Region().RegionEpoch.ConfVer,
-								Version: d.Region().RegionEpoch.Version + 1,
+								Version: d.Region().RegionEpoch.Version,
 							},
 							Peers: peers,
 						}
-						for _, metaPeer := range newRegion.Peers {
-							peer, _ := createPeer(metaPeer.StoreId, d.ctx.cfg, d.ctx.regionTaskSender, d.ctx.engine, newRegion)
-							d.ctx.router.register(peer)
-						}
+						d.Region().EndKey = split.SplitKey
+						log.Infof("Handle Split Request, old Region %+v, new Region %+v", d.Region(), newRegion)
+
+						peer, _ := createPeer(d.storeID(), d.ctx.cfg, d.ctx.regionTaskSender, d.ctx.engine, newRegion)
+						d.ctx.router.register(peer)
+						t := newPeerMsgHandler(peer, d.ctx)
+
+						var kvWB engine_util.WriteBatch
+						meta.WriteRegionState(&kvWB, d.Region(), rspb.PeerState_Normal)
+						meta.WriteRegionState(&kvWB, newRegion, rspb.PeerState_Normal)
+						d.peerStorage.Engines.WriteKV(&kvWB)
+
 						d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: newRegion})
 						d.ctx.storeMeta.regions[newRegion.Id] = d.Region()
-						d.Region().EndKey = adminRequest.Split.SplitKey
+
+						d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
+						d.ctx.storeMeta.regions[d.regionId] = d.Region()
+
+						d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
+						t.HeartbeatScheduler(t.ctx.schedulerTaskSender)
+
 						//TODO ExceedEndKey not used
 					}
-
-					proposal.cb.Done(&raft_cmdpb.RaftCmdResponse{
-						Header: &raft_cmdpb.RaftResponseHeader{},
-						AdminResponse: &raft_cmdpb.AdminResponse{
-							CmdType: adminRequest.CmdType,
-						},
-					})
+					if proposal.cb != nil {
+						proposal.cb.Done(&raft_cmdpb.RaftCmdResponse{
+							Header: &raft_cmdpb.RaftResponseHeader{},
+							AdminResponse: &raft_cmdpb.AdminResponse{
+								CmdType: adminRequest.CmdType,
+							},
+						})
+					}
 				}
 				d.proposals = append(d.proposals[:i], d.proposals[i+1:]...)
 				break
@@ -257,6 +276,10 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		switch request.CmdType {
 		case raft_cmdpb.CmdType_Get:
 			{
+				if err := util.CheckKeyInRegion(request.Get.Key, d.Region()); err != nil {
+					cb.Done(ErrResp(err))
+					continue
+				}
 				value, err := engine_util.GetCF(d.peerStorage.Engines.Kv, request.Get.Cf, request.Get.Key)
 				if err != nil {
 					cb.Done(ErrResp(err))
@@ -348,13 +371,20 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 				cb.Done(ErrResp(err))
 			}
 		case raft_cmdpb.AdminCmdType_Split:
-			data, _ := adminRequest.Marshal()
-			_ = d.RaftGroup.Propose(data)
+			str, _ := adminRequest.Marshal()
 			d.peer.proposals = append(d.peer.proposals, &proposal{
 				term:  d.Term(),
 				index: d.nextProposalIndex(),
 				cb:    cb,
 			})
+			err := d.peer.RaftGroup.Raft.Step(eraftpb.Message{
+				MsgType: eraftpb.MessageType_MsgPropose,
+				To:      d.GetLead(),
+				Entries: []*eraftpb.Entry{{Data: str}},
+			})
+			if err != nil {
+				cb.Done(ErrResp(err))
+			}
 		}
 
 	}
