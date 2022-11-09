@@ -771,7 +771,9 @@ func (r *Raft) sendSnapshot(to uint64) {
 		return
 	}
 	snapshot, err := r.RaftLog.GetSnapshot()
-	for i := max(snapshot.Metadata.Index, r.RaftLog.entries[0].Index) + 1; i < r.RaftLog.LastIndex(); i++ {
+	//breaking change maybe here !
+	firstIndex, _ := r.RaftLog.storage.FirstIndex()
+	for i := max(snapshot.Metadata.Index+1, firstIndex); i <= r.RaftLog.LastIndex(); i++ {
 		// We skip snapshot entry
 		entry := r.RaftLog.at(i)
 		entries = append(entries, entry)
@@ -794,10 +796,19 @@ func (r *Raft) sendSnapshot(to uint64) {
 }
 
 func (r *Raft) alreadySendSnapshot(to uint64) bool {
+	var message pb.Message
 	for _, msg := range r.msgs {
-		if msg.To == to && msg.MsgType == pb.MessageType_MsgSnapshot {
-			return true
+		if msg.MsgType == pb.MessageType_MsgSnapshot {
+			if msg.To == to {
+				return true
+			}
+			message = msg
 		}
+	}
+	if message.MsgType != 0 {
+		message.To = to
+		r.msgs = append(r.msgs, message)
+		return true
 	}
 	return false
 }
