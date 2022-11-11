@@ -359,6 +359,9 @@ func (p *peer) sendRaftMessage(msg eraftpb.Message, trans Transport) error {
 	sendMsg := new(rspb.RaftMessage)
 	sendMsg.RegionId = p.regionId
 	// set current epoch
+	if p.PeerId() == 2 && p.Region().RegionEpoch.ConfVer == 2 {
+		log.Infof("")
+	}
 	sendMsg.RegionEpoch = &metapb.RegionEpoch{
 		ConfVer: p.Region().RegionEpoch.ConfVer,
 		Version: p.Region().RegionEpoch.Version,

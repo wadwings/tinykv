@@ -182,10 +182,10 @@ func (l *RaftLog) IndexCheck() {
 func (l *RaftLog) GetSnapshot() (*pb.Snapshot, error) {
 	var snapshot pb.Snapshot
 	var err error
-	for tryCount := 1; tryCount != 10; tryCount++ {
+	for tryCount := 1; tryCount != 300; tryCount++ {
 		snapshot, err = l.storage.Snapshot()
 		if err != nil {
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond)
 		} else {
 			break
 		}

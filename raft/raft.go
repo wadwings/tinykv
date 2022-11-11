@@ -262,6 +262,10 @@ func (r *Raft) deduplicateAppend(to uint64) {
 func (r *Raft) sendHeartbeat(to uint64) {
 	// Your Code Here (2A).
 	if r.State == StateLeader {
+		if _, isActive := r.alives[to]; !isActive {
+			r.ActivateNode(to)
+			return
+		}
 		r.msgs = append(r.msgs, pb.Message{
 			MsgType:              pb.MessageType_MsgHeartbeat,
 			To:                   to,
@@ -327,6 +331,10 @@ func (r *Raft) bcastMsg(msgType pb.MessageType) {
 
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
+	// we prevent newly create node to have tick to accelerate leadership election
+	if len(r.Prs) == 0 {
+		return
+	}
 	if r.State == StateLeader {
 		r.heartbeatElapsed++
 		if r.heartbeatElapsed >= r.heartbeatTimeout {
@@ -599,6 +607,9 @@ func (r *Raft) handleHeartBeatResponse(m pb.Message) {
 	if m.Term == r.Term {
 		r.alives[m.From] = true
 		r.checkLeaderLease()
+		if r.Prs[m.From].Match != r.RaftLog.LastIndex() {
+			r.sendAppend(m.From)
+		}
 	}
 }
 
@@ -713,6 +724,7 @@ func (r *Raft) handleHup(m pb.Message) {
 }
 
 func (r *Raft) checkVoteResult() {
+	//Avoid newly create region peer to be leader, since the raft node haven't received snapshot and didn't get the peer info
 	approved := 0
 	for _, v := range r.votes {
 		if v {
@@ -771,16 +783,19 @@ func (r *Raft) sendSnapshot(to uint64) {
 		return
 	}
 	snapshot, err := r.RaftLog.GetSnapshot()
+	if err != nil {
+		log.Fatalf("snapshot generate fail! reason: %v", err)
+		return
+	}
 	//breaking change maybe here !
 	firstIndex, _ := r.RaftLog.storage.FirstIndex()
+	firstIndex = max(firstIndex, r.RaftLog.entries[0].Index)
 	for i := max(snapshot.Metadata.Index+1, firstIndex); i <= r.RaftLog.LastIndex(); i++ {
 		// We skip snapshot entry
 		entry := r.RaftLog.at(i)
 		entries = append(entries, entry)
 	}
-	if err != nil {
-		log.Fatalf("snapshot generate fail! reason: %v", err)
-	}
+
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType:  pb.MessageType_MsgSnapshot,
 		From:     r.id,
@@ -792,23 +807,14 @@ func (r *Raft) sendSnapshot(to uint64) {
 		Snapshot: snapshot,
 		Entries:  entries,
 	})
-	log.Warnf("%v send snapshot message %+v", r.id, r.msgs[len(r.msgs)-1])
+	//log.Warnf("%v send snapshot message %+v", r.id, r.msgs[len(r.msgs)-1])
 }
 
 func (r *Raft) alreadySendSnapshot(to uint64) bool {
-	var message pb.Message
 	for _, msg := range r.msgs {
-		if msg.MsgType == pb.MessageType_MsgSnapshot {
-			if msg.To == to {
-				return true
-			}
-			message = msg
+		if msg.MsgType == pb.MessageType_MsgSnapshot && msg.To == to {
+			return true
 		}
-	}
-	if message.MsgType != 0 {
-		message.To = to
-		r.msgs = append(r.msgs, message)
-		return true
 	}
 	return false
 }
@@ -909,26 +915,29 @@ func (r *Raft) addNode(id uint64) {
 		Match: 0,
 		Next:  r.RaftLog.LastIndex() + 1,
 	}
-	r.alives[id] = false
 	r.votes[id] = false
 	if r.State == StateLeader {
-		r.msgs = append(r.msgs, pb.Message{
-			MsgType:              pb.MessageType_MsgHeartbeat,
-			To:                   id,
-			From:                 r.id,
-			Term:                 r.Term,
-			LogTerm:              0,
-			Index:                r.Prs[id].Match,
-			Entries:              nil,
-			Commit:               0,
-			Snapshot:             nil,
-			Reject:               false,
-			XXX_NoUnkeyedLiteral: struct{}{},
-			XXX_unrecognized:     nil,
-			XXX_sizecache:        0,
-		})
+		r.ActivateNode(id)
 	}
 	// Your Code Here (3A).
+}
+
+func (r *Raft) ActivateNode(to uint64) {
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType:              pb.MessageType_MsgHeartbeat,
+		To:                   to,
+		From:                 r.id,
+		Term:                 r.Term,
+		LogTerm:              0,
+		Index:                r.Prs[to].Match,
+		Entries:              nil,
+		Commit:               0,
+		Snapshot:             nil,
+		Reject:               false,
+		XXX_NoUnkeyedLiteral: struct{}{},
+		XXX_unrecognized:     nil,
+		XXX_sizecache:        0,
+	})
 }
 
 // removeNode remove a node from raft group

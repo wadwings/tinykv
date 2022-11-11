@@ -334,27 +334,6 @@ func (ps *PeerStorage) Apply(committedEntries []eraftpb.Entry, kvWB *engine_util
 	}
 	for _, entry := range committedEntries {
 		if entry.EntryType == eraftpb.EntryType_EntryConfChange {
-			var cc eraftpb.ConfChange
-			_ = cc.Unmarshal(entry.Data)
-			// when conf change happen, confver increase
-			// update peer information in region
-			if cc.ChangeType == eraftpb.ConfChangeType_AddNode && !ps.PeerIDExists(cc.NodeId) {
-				ps.region.RegionEpoch.ConfVer++
-				log.Warnf("%v current region epoch %+v", ps.Tag, ps.region.RegionEpoch)
-				var peer metapb.Peer
-				_ = peer.Unmarshal(cc.Context)
-				ps.region.Peers = append(ps.region.Peers, &peer)
-			} else if cc.ChangeType == eraftpb.ConfChangeType_RemoveNode && ps.PeerIDExists(cc.NodeId) {
-				ps.region.RegionEpoch.ConfVer++
-				log.Warnf("%v current region epoch %+v", ps.Tag, ps.region.RegionEpoch)
-				for i, peer := range ps.region.Peers {
-					if peer.Id == cc.NodeId {
-						ps.region.Peers = append(ps.region.Peers[:i], ps.region.Peers[i+1:]...)
-						break
-					}
-				}
-			}
-			ps.PendingCC = append(ps.PendingCC, &cc)
 			continue
 		}
 		var request raft_cmdpb.Request
@@ -401,14 +380,8 @@ func (ps *PeerStorage) SaveState(raftWB *engine_util.WriteBatch, kvWB *engine_ut
 	if err := kvWB.SetMeta(meta.ApplyStateKey(ps.region.Id), ps.applyState); err != nil {
 		return err
 	}
-	localState := rspb.RegionLocalState{
-		State:  rspb.PeerState_Normal,
-		Region: ps.region,
-	}
-	if err := kvWB.SetMeta(meta.RegionStateKey(ps.region.Id), &localState); err != nil {
-		return err
-	}
-
+	meta.WriteRegionState(kvWB, ps.Region(), rspb.PeerState_Normal)
+	//log.Infof("%v write region info to kv engine", ps.Tag)
 	return nil
 }
 
