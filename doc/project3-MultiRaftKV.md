@@ -150,7 +150,7 @@ Then how the Scheduler determines whether it could skip this update? We can list
 
 Don’t worry. You don’t need to find a strict sufficient and necessary condition. Redundant updates won’t affect correctness.
 
-If the Scheduler determines to update local storage according to this heartbeat, there are two things it should update: region tree and store status. You could use `RaftCluster.core.PutRegion` to update the region tree and use `RaftCluster.core.UpdateStoreStatus` to update related store’s status (such as leader count, region count, pending peer count… ).
+If the Scheduler determines to update local storage according to this heartbeat, there are two things it should update: region tree and store status. You could use `RaftCluster.core.PutRegion` to update the region tree and use `RaftCluster.core.UpdateStoreStatus` to update related store’s status (such as leader coulannt, region count, pending peer count… ).
 
 ### Implement region balance scheduler
 

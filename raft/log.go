@@ -15,6 +15,7 @@
 package raft
 
 import (
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"time"
 )
@@ -64,11 +65,11 @@ func newLog(storage Storage) *RaftLog {
 	lastIndex, _ := storage.LastIndex()
 	firstIndex, _ := storage.FirstIndex()
 	entries, _ := storage.Entries(firstIndex, lastIndex+1)
-	//entries range : entries[firstIndex - offset, lastIndex + 1 - offset]
+	//entries range : entries[firstIndex - offset, lastIndex + 1 - offset)
 	hardState, _, _ := storage.InitialState()
 	return &RaftLog{
 		storage:   storage,
-		applied:   firstIndex - 1,
+		applied:   lastIndex,
 		stabled:   lastIndex,
 		entries:   entries,
 		committed: hardState.Commit,
@@ -100,15 +101,21 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 	if len(l.entries) == 0 {
 		return nil
 	}
-	return l.entries[l.stabled-l.GetOffset()+1 : l.LastIndex()-l.GetOffset()+1]
+	return l.Entries(l.stabled-l.GetOffset()+1, l.LastIndex()-l.GetOffset()+1)
 }
 
 // nextEnts returns all the committed but not applied entries
-func (l *RaftLog) nextEnts() (ents []pb.Entry) {
+func (l *RaftLog) nextEnts() []pb.Entry {
 	if len(l.entries) == 0 {
 		return nil
 	}
-	return l.entries[l.applied-l.GetOffset()+1 : l.committed-l.GetOffset()+1]
+	return l.Entries(l.applied-l.GetOffset()+1, l.committed-l.GetOffset()+1)
+}
+
+func (l *RaftLog) Entries(lo, hi uint64) []pb.Entry {
+	res := make([]pb.Entry, hi-lo)
+	copy(res, l.entries[lo:hi])
+	return res
 }
 
 // LastIndex return the last index of the log entries
@@ -169,14 +176,22 @@ func (l *RaftLog) Apply(entries []pb.Entry) uint64 {
 
 func (l *RaftLog) IndexCheck() {
 	if l.applied > l.committed {
+		l.printRaftlog()
 		panic("")
 	}
 	if l.committed > l.LastIndex() {
+		l.printRaftlog()
 		panic("")
 	}
 	if l.stabled > l.LastIndex() {
+		l.printRaftlog()
 		panic("")
 	}
+}
+
+func (l *RaftLog) printRaftlog() {
+	log.Infof("%+v", l)
+	log.Infof("%+v", l.entries)
 }
 
 func (l *RaftLog) GetSnapshot() (*pb.Snapshot, error) {

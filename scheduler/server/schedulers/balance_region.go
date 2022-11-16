@@ -14,10 +14,12 @@
 package schedulers
 
 import (
+	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/core"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule/operator"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule/opt"
+	"sort"
 )
 
 func init() {
@@ -77,6 +79,85 @@ func (s *balanceRegionScheduler) IsScheduleAllowed(cluster opt.Cluster) bool {
 
 func (s *balanceRegionScheduler) Schedule(cluster opt.Cluster) *operator.Operator {
 	// Your Code Here (3C).
+	var selectedRegionInfo *core.RegionInfo
+	var selectedStoreIndex uint64
+	StoreInfos := cluster.GetStores()
 
-	return nil
+	cluster.GetMaxReplicas()
+	sort.Slice(StoreInfos, func(i, j int) bool {
+		return StoreInfos[i].GetRegionSize() > StoreInfos[j].GetRegionSize()
+	})
+	upStoreCount := 0
+	for _, store := range StoreInfos {
+		if IsStoreAvailable(store, cluster) {
+			upStoreCount++
+		}
+	}
+	if upStoreCount <= cluster.GetMaxReplicas() {
+		//don't have spare slot for peer to move
+		return nil
+	}
+	for i, storeInfo := range StoreInfos {
+		if !IsStoreAvailable(storeInfo, cluster) {
+			continue
+		}
+		cluster.GetPendingRegionsWithLock(storeInfo.GetID(), func(container core.RegionsContainer) {
+			selectedRegionInfo = container.RandomRegion(nil, nil)
+			if selectedRegionInfo == nil {
+				cluster.GetFollowersWithLock(storeInfo.GetID(), func(container core.RegionsContainer) {
+					selectedRegionInfo = container.RandomRegion(nil, nil)
+					if selectedRegionInfo == nil {
+						cluster.GetLeadersWithLock(storeInfo.GetID(), func(container core.RegionsContainer) {
+							selectedRegionInfo = container.RandomRegion(nil, nil)
+						})
+					}
+				})
+			}
+		})
+		selectedStoreIndex = uint64(i)
+		if selectedRegionInfo != nil {
+			break
+		}
+	}
+	var minStoreID uint64
+	for i := uint64(len(StoreInfos) - 1); i > selectedStoreIndex; i-- {
+		if !IsStoreAvailable(StoreInfos[i], cluster) {
+			continue
+		}
+		if _, ok := selectedRegionInfo.GetStoreIds()[StoreInfos[i].GetID()]; !ok {
+			minStoreID = i
+			break
+		}
+	}
+	selectedRegionInfo.GetStoreIds()
+	if StoreInfos[selectedStoreIndex].GetRegionSize()-StoreInfos[minStoreID].GetRegionSize() <= 2*selectedRegionInfo.GetApproximateSize() {
+		//The diff between two store region size is not big enough
+		return nil
+	}
+	oldStoreId := StoreInfos[selectedStoreIndex].GetID()
+	newStoreId := StoreInfos[minStoreID].GetID()
+	var peerID uint64
+	var opt *operator.Operator
+	var err error
+	for _, peer := range selectedRegionInfo.GetPeers() {
+		if peer.StoreId == oldStoreId {
+			peerID = peer.Id
+			break
+		}
+	}
+	if opt, err = operator.CreateMovePeerOperator("", cluster, selectedRegionInfo, operator.OpBalance, oldStoreId, newStoreId, peerID); err != nil {
+		return nil
+	} else {
+		return opt
+	}
+}
+
+func IsStoreAvailable(info *core.StoreInfo, cluster opt.Cluster) bool {
+	if info.GetMeta().GetState() != metapb.StoreState_Up {
+		return false
+	}
+	if info.DownTime() > cluster.GetMaxStoreDownTime() {
+		return false
+	}
+	return true
 }

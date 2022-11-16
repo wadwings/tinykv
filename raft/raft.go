@@ -518,7 +518,11 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		if len(m.Entries) != 0 {
 			//If an existing entry conflicts with a new one (same index but different terms),
 			//delete the existing entry and all that follow it; append any new entries not already in the log.
-			r.RaftLog.entries = r.RaftLog.entries[0 : m.Index-r.RaftLog.GetOffset()+1]
+			if int(m.Index+1-r.RaftLog.GetOffset()) <= 0 {
+				r.RaftLog.entries = []pb.Entry{}
+			} else {
+				r.RaftLog.entries = r.RaftLog.entries[0 : m.Index-r.RaftLog.GetOffset()+1]
+			}
 			r.RaftLog.stabled = min(r.RaftLog.stabled, r.RaftLog.LastIndex())
 			r.RaftLog.Append(m.Entries)
 			// Now we match newer entry
@@ -577,11 +581,9 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 		r.becomeFollower(m.Term, m.From)
 	}
 	if m.Term == r.Term && r.Lead == m.From {
-		//TODO
 		if m.Commit > r.RaftLog.LastIndex() {
 			reject = true
 		} else {
-			//TODO
 			r.RaftLog.committed = max(r.RaftLog.committed, min(m.Index, m.Commit))
 			r.RaftLog.IndexCheck()
 		}
@@ -812,8 +814,10 @@ func (r *Raft) sendSnapshot(to uint64) {
 
 func (r *Raft) alreadySendSnapshot(to uint64) bool {
 	for _, msg := range r.msgs {
-		if msg.MsgType == pb.MessageType_MsgSnapshot && msg.To == to {
-			return true
+		if msg.MsgType == pb.MessageType_MsgSnapshot {
+			if msg.To == to {
+				return true
+			}
 		}
 	}
 	return false

@@ -50,31 +50,22 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	//log.Infof("%v start HandleRaftReady", d.PeerId())
 	ready := d.RaftGroup.Ready()
 	//log.Infof("%+v", ready)
-	d.onReplicate()
-	//log.Infof("%+v", ready.Messages)
+	log.Infof("%v %+v", d.Tag, ready.Messages)
 	if _, err := d.peerStorage.SaveReadyState(&ready); err != nil {
 		return
 	}
 	d.RaftGroup.Advance(ready)
 	//d.ctx.storeMeta.setRegion(d.Region(), d.peer) //TODO
 	//d.handlePendingCC()
+	//log.Infof("%v peer cache %+v", d.Tag, d.peerCache)
 	if !raft.IsEmptySnap(&ready.Snapshot) {
 		d.updateStoreMeta()
 	}
-	//log.Infof("%v peer cache %+v", d.Tag, d.peerCache)
 	d.HandleProposal(ready.CommittedEntries)
 	d.Send(d.ctx.trans, ready.Messages)
+
 	//log.Infof("%v after handle possible confchange, peer cache %+v", d.Tag, d.peerCache)
 	// Your Code Here (2B).
-}
-
-func (d *peerMsgHandler) onReplicate() {
-	if len(d.Region().Peers) == 0 {
-		d.Region().Peers = append(d.Region().Peers, &metapb.Peer{
-			StoreId: d.storeID(),
-			Id:      d.PeerId(),
-		})
-	}
 }
 
 func (d *peerMsgHandler) handleConfChange(cc *eraftpb.ConfChange) {
@@ -91,7 +82,7 @@ func (d *peerMsgHandler) handleConfChange(cc *eraftpb.ConfChange) {
 		// clear cache
 	}
 	d.RaftGroup.ApplyConfChange(*cc)
-	d.updateStoreMeta()
+
 }
 
 func (d *peerMsgHandler) updateStoreMeta() {
@@ -99,8 +90,7 @@ func (d *peerMsgHandler) updateStoreMeta() {
 	defer d.ctx.storeMeta.Unlock()
 	d.ctx.storeMeta.regions[d.regionId] = d.Region()
 	d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
-	log.Warnf("%v current peers %+v", d.Tag, d.Region().Peers)
-	log.Warnf("%v current region Epoch %+v", d.Tag, d.Region().RegionEpoch)
+
 }
 
 func (d *peerMsgHandler) IsValidSplit(split *raft_cmdpb.SplitRequest) bool {
@@ -144,7 +134,7 @@ func (d *peerMsgHandler) updateSplitMeta(adminRequest *raft_cmdpb.AdminRequest) 
 	var kvWB engine_util.WriteBatch
 	meta.WriteRegionState(&kvWB, d.Region(), rspb.PeerState_Normal)
 	d.peerStorage.Engines.WriteKV(&kvWB)
-
+	log.Infof("%v save region state %+v to db", d.Tag, d.Region())
 	return endKey
 }
 
@@ -192,6 +182,8 @@ func (d *peerMsgHandler) onSplit(split *raft_cmdpb.SplitRequest, endKey []byte) 
 	var kvWB engine_util.WriteBatch
 	meta.WriteRegionState(&kvWB, newRegion, rspb.PeerState_Normal)
 	d.peerStorage.Engines.WriteKV(&kvWB)
+	log.Infof("%v save region state %+v to db", d.Tag, d.Region())
+
 	return newRegion
 }
 
@@ -383,6 +375,12 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 				cb.Done(response)
 			}
 		case raft_cmdpb.CmdType_Snap:
+			clonedRegion := new(metapb.Region)
+			err := util.CloneMsg(d.Region(), clonedRegion)
+			if err != nil {
+				cb.Done(ErrResp(err))
+				return
+			}
 			d.RaftGroup.RegisterSnapRequest(func(err error) {
 				if err != nil {
 					log.Infof("%s refuse snap request", d.Tag)
@@ -395,7 +393,7 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 					Header: &raft_cmdpb.RaftResponseHeader{},
 					Responses: []*raft_cmdpb.Response{{
 						CmdType: request.CmdType,
-						Snap:    &raft_cmdpb.SnapResponse{Region: d.Region()},
+						Snap:    &raft_cmdpb.SnapResponse{Region: clonedRegion},
 					}},
 				})
 			})
@@ -569,14 +567,16 @@ func (d *peerMsgHandler) updateRegionPeer(cc *eraftpb.ConfChange) {
 	ps := d.peerStorage
 	if cc.ChangeType == eraftpb.ConfChangeType_AddNode && !ps.PeerIDExists(cc.NodeId) {
 		ps.region.RegionEpoch.ConfVer++
-		log.Warnf("%v current region epoch %+v", ps.Tag, ps.region.RegionEpoch)
+
 		var peer metapb.Peer
 		_ = peer.Unmarshal(cc.Context)
 		ps.region.Peers = append(ps.region.Peers, &peer)
 		d.saveRegionInfo()
+		log.Warnf("%v current peers %+v", d.Tag, d.Region().Peers)
+		log.Warnf("%v current region Epoch %+v", d.Tag, d.Region().RegionEpoch)
+		d.updateStoreMeta()
 	} else if cc.ChangeType == eraftpb.ConfChangeType_RemoveNode && ps.PeerIDExists(cc.NodeId) {
 		ps.region.RegionEpoch.ConfVer++
-		log.Warnf("%v current region epoch %+v", ps.Tag, ps.region.RegionEpoch)
 		for i, peer := range ps.region.Peers {
 			if peer.Id == cc.NodeId {
 				ps.region.Peers = append(ps.region.Peers[:i], ps.region.Peers[i+1:]...)
@@ -584,13 +584,20 @@ func (d *peerMsgHandler) updateRegionPeer(cc *eraftpb.ConfChange) {
 			}
 		}
 		d.saveRegionInfo()
+		log.Warnf("%v current peers %+v", d.Tag, d.Region().Peers)
+		log.Warnf("%v current region Epoch %+v", d.Tag, d.Region().RegionEpoch)
+		d.updateStoreMeta()
 	}
 }
 
 func (d *peerMsgHandler) saveRegionInfo() {
 	var kvWB engine_util.WriteBatch
 	meta.WriteRegionState(&kvWB, d.Region(), rspb.PeerState_Normal)
-	d.peerStorage.Engines.WriteKV(&kvWB)
+	if err := d.peerStorage.Engines.WriteKV(&kvWB); err != nil {
+		panic(err)
+	}
+	log.Infof("%v save region state %+v to db", d.Tag, d.Region())
+
 }
 
 func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
@@ -815,9 +822,11 @@ func (d *peerMsgHandler) destroyPeer() {
 	d.ctx.router.close(regionID)
 	d.stopped = true
 	if isInitialized && meta.regionRanges.Delete(&regionItem{region: d.Region()}) == nil {
+		log.Error("Trying delete %v, can't delete region info in regionRanges", d.Tag)
 		panic(d.Tag + " meta corruption detected")
 	}
 	if _, ok := meta.regions[regionID]; !ok {
+		log.Error("Trying delete %v, can't delete region info in meta region", d.Tag)
 		panic(d.Tag + " meta corruption detected")
 	}
 	delete(meta.regions, regionID)
