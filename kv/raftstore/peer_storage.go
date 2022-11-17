@@ -49,6 +49,8 @@ type PeerStorage struct {
 	Engines *engine_util.Engines
 	// Tag used for logging
 	Tag string
+	//PendingCC are ConfChange needed to be evaluated in rawNode
+	PendingCC []*eraftpb.ConfChange
 }
 
 // NewPeerStorage get the persist raftState from engines and return a peer storage
@@ -331,6 +333,9 @@ func (ps *PeerStorage) Apply(committedEntries []eraftpb.Entry, kvWB *engine_util
 		return nil
 	}
 	for _, entry := range committedEntries {
+		if entry.EntryType == eraftpb.EntryType_EntryConfChange {
+			continue
+		}
 		var request raft_cmdpb.Request
 		if entry.Data == nil {
 			continue
@@ -366,23 +371,20 @@ func (ps *PeerStorage) Apply(committedEntries []eraftpb.Entry, kvWB *engine_util
 }
 
 func (ps *PeerStorage) SaveState(raftWB *engine_util.WriteBatch, kvWB *engine_util.WriteBatch, rd *raft.Ready) error {
+	log.Infof("%v save raft state %+v to db", ps.Tag, ps.raftState)
 	if err := raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState); err != nil {
 		return err
 	}
 	if raft.IsEmptyHardState(*ps.raftState.HardState) {
 		log.Fatalf("RaftLocalState.HardState is empty!")
 	}
+	log.Infof("%v save apply state %+v to db", ps.Tag, ps.applyState)
 	if err := kvWB.SetMeta(meta.ApplyStateKey(ps.region.Id), ps.applyState); err != nil {
 		return err
 	}
-	localState := rspb.RegionLocalState{
-		State:  rspb.PeerState_Normal,
-		Region: ps.region,
-	}
-	if err := kvWB.SetMeta(meta.RegionStateKey(ps.region.Id), &localState); err != nil {
-		return err
-	}
-
+	log.Infof("%v save region state %+v to db", ps.Tag, ps.region)
+	meta.WriteRegionState(kvWB, ps.Region(), rspb.PeerState_Normal)
+	//log.Infof("%v write region info to kv engine", ps.Tag)
 	return nil
 }
 
@@ -396,9 +398,9 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	if err := snapData.Unmarshal(snapshot.Data); err != nil {
 		return nil, err
 	}
-	//if snapData.Region != nil {
-	//	ps.region = snapData.Region
-	//}
+	if snapData.Region != nil {
+		ps.region = snapData.Region
+	}
 	ps.raftState.LastIndex = max(ps.raftState.LastIndex, metaData.Index)
 	ps.raftState.LastTerm = max(ps.raftState.LastTerm, metaData.Term)
 	ps.applyState.AppliedIndex = max(ps.applyState.AppliedIndex, metaData.Index)
@@ -461,8 +463,11 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	if err := ps.Apply(ready.CommittedEntries, &kvWB); err != nil {
 		return nil, err
 	}
-	if err := ps.SaveState(&raftWB, &kvWB, ready); err != nil {
-		return nil, err
+	// we only store peer region info when peer is initialized
+	if len(ps.region.Peers) != 0 {
+		if err := ps.SaveState(&raftWB, &kvWB, ready); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := ps.Engines.WriteRaft(&raftWB); err != nil {
@@ -487,6 +492,15 @@ func (ps *PeerStorage) clearRange(regionID uint64, start, end []byte) {
 		StartKey: start,
 		EndKey:   end,
 	}
+}
+
+func (ps *PeerStorage) PeerIDExists(peerID uint64) bool {
+	for _, peer := range ps.region.Peers {
+		if peer.Id == peerID {
+			return true
+		}
+	}
+	return false
 }
 
 func max(a, b uint64) uint64 {

@@ -15,8 +15,8 @@
 package raft
 
 import (
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
-	"github.com/pkg/errors"
 	"time"
 )
 
@@ -65,11 +65,11 @@ func newLog(storage Storage) *RaftLog {
 	lastIndex, _ := storage.LastIndex()
 	firstIndex, _ := storage.FirstIndex()
 	entries, _ := storage.Entries(firstIndex, lastIndex+1)
-	//entries range : entries[firstIndex - offset, lastIndex + 1 - offset]
+	//entries range : entries[firstIndex - offset, lastIndex + 1 - offset)
 	hardState, _, _ := storage.InitialState()
 	return &RaftLog{
 		storage:   storage,
-		applied:   firstIndex - 1,
+		applied:   lastIndex,
 		stabled:   lastIndex,
 		entries:   entries,
 		committed: hardState.Commit,
@@ -101,15 +101,21 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 	if len(l.entries) == 0 {
 		return nil
 	}
-	return l.entries[l.stabled-l.GetOffset()+1 : l.LastIndex()-l.GetOffset()+1]
+	return l.Entries(l.stabled-l.GetOffset()+1, l.LastIndex()-l.GetOffset()+1)
 }
 
 // nextEnts returns all the committed but not applied entries
-func (l *RaftLog) nextEnts() (ents []pb.Entry) {
+func (l *RaftLog) nextEnts() []pb.Entry {
 	if len(l.entries) == 0 {
 		return nil
 	}
-	return l.entries[l.applied-l.GetOffset()+1 : l.committed-l.GetOffset()+1]
+	return l.Entries(l.applied-l.GetOffset()+1, l.committed-l.GetOffset()+1)
+}
+
+func (l *RaftLog) Entries(lo, hi uint64) []pb.Entry {
+	res := make([]pb.Entry, hi-lo)
+	copy(res, l.entries[lo:hi])
+	return res
 }
 
 // LastIndex return the last index of the log entries
@@ -131,7 +137,8 @@ func (l *RaftLog) NextIndex() uint64 {
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	if i < l.GetOffset() || i > l.LastIndex() {
-		return 0, errors.New("read uninitialized address buffer")
+		// maybe a break change
+		return l.storage.Term(i)
 	}
 	return l.at(i).Term, nil
 }
@@ -169,23 +176,31 @@ func (l *RaftLog) Apply(entries []pb.Entry) uint64 {
 
 func (l *RaftLog) IndexCheck() {
 	if l.applied > l.committed {
+		l.printRaftlog()
 		panic("")
 	}
 	if l.committed > l.LastIndex() {
+		l.printRaftlog()
 		panic("")
 	}
 	if l.stabled > l.LastIndex() {
+		l.printRaftlog()
 		panic("")
 	}
+}
+
+func (l *RaftLog) printRaftlog() {
+	log.Infof("%+v", l)
+	log.Infof("%+v", l.entries)
 }
 
 func (l *RaftLog) GetSnapshot() (*pb.Snapshot, error) {
 	var snapshot pb.Snapshot
 	var err error
-	for tryCount := 1; tryCount != 10; tryCount++ {
+	for tryCount := 1; tryCount != 300; tryCount++ {
 		snapshot, err = l.storage.Snapshot()
 		if err != nil {
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond)
 		} else {
 			break
 		}

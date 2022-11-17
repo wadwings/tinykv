@@ -16,6 +16,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
 	"path"
 	"sync"
 	"time"
@@ -278,7 +279,49 @@ func (c *RaftCluster) handleStoreHeartbeat(stats *schedulerpb.StoreStats) error 
 
 // processRegionHeartbeat updates the region information.
 func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
+	if curRegion, _ := c.GetRegionByID(region.GetID()); curRegion != nil {
+		if util.IsEpochStale(region.GetRegionEpoch(), curRegion.GetRegionEpoch()) {
+			return errors.New(fmt.Sprintf("received region epoch %+v is staler than current region epoch %+v", region.GetRegionEpoch(), curRegion.GetRegionEpoch()))
+		}
+	}
+
+	for storeId, _ := range region.GetStoreIds() {
+		storeInfo := c.core.GetStore(storeId)
+		var leaderCount, pendingPeerCount, regionCount int
+		var leaderSize, RegionSize int64
+		var storeRegionInfo []*core.RegionInfo
+		if storeInfo != nil {
+			storeRegionInfo = c.GetStoreRegions(storeId)
+			leaderCount = storeInfo.GetLeaderCount()
+			pendingPeerCount = storeInfo.GetPendingPeerCount()
+			regionCount = storeInfo.GetRegionCount()
+			leaderSize = storeInfo.GetLeaderSize()
+			RegionSize = storeInfo.GetRegionSize()
+		}
+
+		regionCount++
+		if region.GetLeader().GetStoreId() == storeId {
+			leaderCount++
+		}
+		if util.IsPendingStore(storeId, region) {
+			pendingPeerCount++
+		}
+		for _, regionInfo := range storeRegionInfo {
+			if regionInfo.GetID() != region.GetID() {
+				continue
+			}
+			regionCount--
+			if regionInfo.GetLeader().GetStoreId() == storeId {
+				leaderCount--
+			}
+			if util.IsPendingStore(storeId, regionInfo) {
+				pendingPeerCount--
+			}
+		}
+		c.core.UpdateStoreStatus(storeId, leaderCount, regionCount, pendingPeerCount, leaderSize, RegionSize)
+	}
 	// Your Code Here (3C).
+	c.core.PutRegion(region)
 
 	return nil
 }
