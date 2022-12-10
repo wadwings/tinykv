@@ -371,18 +371,18 @@ func (ps *PeerStorage) Apply(committedEntries []eraftpb.Entry, kvWB *engine_util
 }
 
 func (ps *PeerStorage) SaveState(raftWB *engine_util.WriteBatch, kvWB *engine_util.WriteBatch, rd *raft.Ready) error {
-	log.Infof("%v save raft state %+v to db", ps.Tag, ps.raftState)
+	//log.Infof("%v save raft state %+v to db", ps.Tag, ps.raftState)
 	if err := raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState); err != nil {
 		return err
 	}
 	if raft.IsEmptyHardState(*ps.raftState.HardState) {
 		log.Fatalf("RaftLocalState.HardState is empty!")
 	}
-	log.Infof("%v save apply state %+v to db", ps.Tag, ps.applyState)
+	//log.Infof("%v save apply state %+v to db", ps.Tag, ps.applyState)
 	if err := kvWB.SetMeta(meta.ApplyStateKey(ps.region.Id), ps.applyState); err != nil {
 		return err
 	}
-	log.Infof("%v save region state %+v to db", ps.Tag, ps.region)
+	//log.Infof("%v save region state %+v to db", ps.Tag, ps.region)
 	meta.WriteRegionState(kvWB, ps.Region(), rspb.PeerState_Normal)
 	//log.Infof("%v write region info to kv engine", ps.Tag)
 	return nil
