@@ -279,49 +279,56 @@ func (c *RaftCluster) handleStoreHeartbeat(stats *schedulerpb.StoreStats) error 
 
 // processRegionHeartbeat updates the region information.
 func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
+	if region == nil {
+		return nil
+	}
 	if curRegion, _ := c.GetRegionByID(region.GetID()); curRegion != nil {
-		if util.IsEpochStale(region.GetRegionEpoch(), curRegion.GetRegionEpoch()) {
+		if region.GetRegionEpoch() == nil || curRegion.GetRegionEpoch() == nil || util.IsEpochStale(region.GetRegionEpoch(), curRegion.GetRegionEpoch()) {
 			return errors.New(fmt.Sprintf("received region epoch %+v is staler than current region epoch %+v", region.GetRegionEpoch(), curRegion.GetRegionEpoch()))
 		}
 	}
-
-	for storeId, _ := range region.GetStoreIds() {
-		storeInfo := c.core.GetStore(storeId)
-		var leaderCount, pendingPeerCount, regionCount int
-		var leaderSize, RegionSize int64
-		var storeRegionInfo []*core.RegionInfo
-		if storeInfo != nil {
-			storeRegionInfo = c.GetStoreRegions(storeId)
-			leaderCount = storeInfo.GetLeaderCount()
-			pendingPeerCount = storeInfo.GetPendingPeerCount()
-			regionCount = storeInfo.GetRegionCount()
-			leaderSize = storeInfo.GetLeaderSize()
-			RegionSize = storeInfo.GetRegionSize()
-		}
-
-		regionCount++
-		if region.GetLeader().GetStoreId() == storeId {
-			leaderCount++
-		}
-		if util.IsPendingStore(storeId, region) {
-			pendingPeerCount++
-		}
-		for _, regionInfo := range storeRegionInfo {
-			if regionInfo.GetID() != region.GetID() {
-				continue
-			}
-			regionCount--
-			if regionInfo.GetLeader().GetStoreId() == storeId {
-				leaderCount--
-			}
-			if util.IsPendingStore(storeId, regionInfo) {
-				pendingPeerCount--
-			}
-		}
-		c.core.UpdateStoreStatus(storeId, leaderCount, regionCount, pendingPeerCount, leaderSize, RegionSize)
-	}
-	// Your Code Here (3C).
 	c.core.PutRegion(region)
+	for _, storeInfo := range c.GetStores() {
+		c.updateStoreStatusLocked(storeInfo.GetID())
+	}
+	c.prepareChecker.collect(region)
+	//for storeId := range region.GetStoreIds() {
+	//	storeInfo := c.core.GetStore(storeId)
+	//	var leaderCount, pendingPeerCount, regionCount int
+	//	var leaderSize, RegionSize int64
+	//	var storeRegionInfo []*core.RegionInfo
+	//	if storeInfo != nil {
+	//		storeRegionInfo = c.GetStoreRegions(storeId)
+	//		leaderCount = storeInfo.GetLeaderCount()
+	//		pendingPeerCount = storeInfo.GetPendingPeerCount()
+	//		regionCount = storeInfo.GetRegionCount()
+	//		leaderSize = storeInfo.GetLeaderSize()
+	//		RegionSize = storeInfo.GetRegionSize()
+	//	}
+	//
+	//	regionCount++
+	//	if region.GetLeader().GetStoreId() == storeId {
+	//		leaderCount++
+	//	}
+	//	if util.IsPendingStore(storeId, region) {
+	//		pendingPeerCount++
+	//	}
+	//
+	//	for _, regionInfo := range storeRegionInfo {
+	//		if regionInfo.GetID() != region.GetID() {
+	//			continue
+	//		}
+	//		regionCount--
+	//		if regionInfo.GetLeader().GetStoreId() == storeId {
+	//			leaderCount--
+	//		}
+	//		if util.IsPendingStore(storeId, regionInfo) {
+	//			pendingPeerCount--
+	//		}
+	//	}
+	//	c.core.UpdateStoreStatus(storeId, leaderCount, regionCount, pendingPeerCount, leaderSize, RegionSize)
+	//}
+	// Your Code Here (3C).
 
 	return nil
 }
@@ -878,6 +885,7 @@ func (checker *prepareChecker) check(c *RaftCluster) bool {
 	}
 	// The number of active regions should be more than total region of all stores * collectFactor
 	if float64(c.core.Length())*collectFactor > float64(checker.sum) {
+		fmt.Printf("false 1")
 		return false
 	}
 	for _, store := range c.GetStores() {
@@ -887,6 +895,7 @@ func (checker *prepareChecker) check(c *RaftCluster) bool {
 		storeID := store.GetID()
 		// For each store, the number of active regions should be more than total region of the store * collectFactor
 		if float64(c.core.GetStoreRegionCount(storeID))*collectFactor > float64(checker.reactiveRegions[storeID]) {
+			fmt.Printf("false 2")
 			return false
 		}
 	}
