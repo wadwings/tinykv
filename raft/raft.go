@@ -814,10 +814,8 @@ func (r *Raft) sendSnapshot(to uint64) {
 
 func (r *Raft) alreadySendSnapshot(to uint64) bool {
 	for _, msg := range r.msgs {
-		if msg.MsgType == pb.MessageType_MsgSnapshot {
-			if msg.To == to {
-				return true
-			}
+		if msg.MsgType == pb.MessageType_MsgSnapshot && msg.To == to {
+			return true
 		}
 	}
 	return false

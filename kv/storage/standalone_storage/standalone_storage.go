@@ -13,13 +13,13 @@ import (
 type StandAloneStorage struct {
 	KPath string
 	VPath string
-	db *badger.DB
+	db    *badger.DB
 	// Your Data Here (1).
 }
 
 type StandAloneStorageReader struct {
 	storage *StandAloneStorage
-	txn *badger.Txn
+	txn     *badger.Txn
 }
 
 func NewStandAloneStorage(conf *config.Config) *StandAloneStorage {
@@ -46,7 +46,7 @@ func (reader *StandAloneStorageReader) GetCF(cf string, key []byte) ([]byte, err
 	return engine_util.GetCF(reader.storage.db, cf, key)
 }
 
-func (reader *StandAloneStorageReader) IterCF(cf string) engine_util.DBIterator{
+func (reader *StandAloneStorageReader) IterCF(cf string) engine_util.DBIterator {
 	txn := reader.storage.db.NewTransaction(true)
 	reader.txn = txn
 	return engine_util.NewCFIterator(cf, txn)
@@ -62,21 +62,10 @@ func (s *StandAloneStorage) Reader(ctx *kvrpcpb.Context) (storage.StorageReader,
 
 func (s *StandAloneStorage) Write(ctx *kvrpcpb.Context, batch []storage.Modify) error {
 	for _, v := range batch {
-		if v.Value() != nil {
-			err := engine_util.PutCF(s.db, v.Cf(), v.Key(), v.Value())
-			if err != nil{
-				return err
-			}
-		}else{
-			err := engine_util.DeleteCF(s.db, v.Cf(), v.Key())
-			if err != nil{
-				return err
-			}
-			err = engine_util.PutCF(s.db, v.Cf(), v.Key(), v.Value())
-			if err != nil{
-				return err
-			}
+		if err := engine_util.PutCF(s.db, v.Cf(), v.Key(), v.Value()); err != nil {
+			return err
 		}
+		//}
 	}
 	return nil
 }

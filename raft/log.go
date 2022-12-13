@@ -69,10 +69,10 @@ func newLog(storage Storage) *RaftLog {
 	hardState, _, _ := storage.InitialState()
 	return &RaftLog{
 		storage:   storage,
-		applied:   lastIndex,
+		committed: hardState.Commit,
+		applied:   firstIndex - 1,
 		stabled:   lastIndex,
 		entries:   entries,
-		committed: hardState.Commit,
 	}
 }
 

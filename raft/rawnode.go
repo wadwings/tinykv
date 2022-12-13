@@ -17,7 +17,6 @@ package raft
 import (
 	"errors"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
-	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -165,7 +164,7 @@ func (rn *RawNode) Step(m pb.Message) error {
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
 	r := rn.Raft
-	log.Infof("%d start generate ready state", rn.Raft.id)
+	//log.Infof("%d start generate ready state", rn.Raft.id)
 	r.RaftLog.IndexCheck()
 	//log.Infof("%+v", r.msgs)
 	rd := Ready{

@@ -50,7 +50,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	//log.Infof("%v start HandleRaftReady", d.PeerId())
 	ready := d.RaftGroup.Ready()
 	//log.Infof("%+v", ready)
-	log.Infof("%v %+v", d.Tag, ready.Messages)
+	//log.Infof("%v %+v", d.Tag, ready.Messages)
 	if _, err := d.peerStorage.SaveReadyState(&ready); err != nil {
 		return
 	}
