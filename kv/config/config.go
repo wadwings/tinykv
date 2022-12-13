@@ -64,7 +64,7 @@ func NewDefaultConfig() *Config {
 	return &Config{
 		SchedulerAddr:            "127.0.0.1:2379",
 		StoreAddr:                "127.0.0.1:20160",
-		LogLevel:                 "info",
+		LogLevel:                 "fatal",
 		Raft:                     true,
 		RaftBaseTickInterval:     1 * time.Second,
 		RaftHeartbeatTicks:       2,

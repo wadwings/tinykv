@@ -9,7 +9,7 @@ endif
 
 GO                  := GO111MODULE=on go
 GOBUILD             := $(GO) build $(BUILD_FLAG) -tags codes
-GOTEST              := $(GO) test -v --count=1 --parallel=1 -p=1
+GOTEST              := $(GO) test -v --count=1 --parallel=1 -p=1 -timeout 3600s
 
 TEST_LDFLAGS        := ""
 
