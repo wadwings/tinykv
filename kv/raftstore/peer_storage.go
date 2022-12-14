@@ -391,9 +391,9 @@ func (ps *PeerStorage) SaveState(raftWB *engine_util.WriteBatch, kvWB *engine_ut
 // Apply the peer with given snapshot
 func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_util.WriteBatch, raftWB *engine_util.WriteBatch) (*ApplySnapResult, error) {
 	log.Infof("%v begin to apply snapshot", ps.Tag)
+	ps.validateSnap(snapshot)
 	prevRegion := ps.Region()
 	snapData := new(rspb.RaftSnapshotData)
-
 	metaData := snapshot.Metadata
 	if err := snapData.Unmarshal(snapshot.Data); err != nil {
 		return nil, err
@@ -401,6 +401,8 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	if snapData.Region != nil {
 		ps.region = snapData.Region
 	}
+
+	ps.Append([]eraftpb.Entry{{Index: metaData.Index, Term: metaData.Term}}, raftWB)
 	ps.raftState.LastIndex = max(ps.raftState.LastIndex, metaData.Index)
 	ps.raftState.LastTerm = max(ps.raftState.LastTerm, metaData.Term)
 	ps.applyState.AppliedIndex = max(ps.applyState.AppliedIndex, metaData.Index)

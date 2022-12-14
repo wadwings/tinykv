@@ -19,6 +19,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"math/rand"
+	"time"
 )
 
 // None is a placeholder node ID used when there is no leader.
@@ -166,6 +167,8 @@ type Raft struct {
 	// value.
 	// (Used in 3A conf change)
 	PendingConfIndex uint64
+
+	snapSendRecord map[uint64]time.Time
 }
 
 // newRaft return a raft peer with the given config
@@ -198,6 +201,7 @@ func newRaft(c *Config) *Raft {
 		electionBaseline:   c.ElectionTick,
 		electionTimeout:    randomizedTimeout(c.ElectionTick),
 		heartbeatTimeout:   c.HeartbeatTick,
+		snapSendRecord:     map[uint64]time.Time{},
 		leaderLeaseElapsed: 0,
 		Term:               hardState.Term,
 		Prs:                prs,
@@ -210,7 +214,7 @@ func newRaft(c *Config) *Raft {
 }
 
 func randomizedTimeout(tz int) int {
-	return int(float32(tz) * (rand.Float32() + 1))
+	return int(float32(tz) * (rand.Float32() + 1) * 2)
 }
 
 // sendAppend sends an ap1pend RPC with new entries (if any) and the
@@ -360,6 +364,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	}
 	//log.Infof("%v now is Follower!", r.id)
 	r.State = StateFollower
+	r.electionElapsed = 0
 	r.Term = term
 	r.Lead = lead
 	r.Vote = lead
@@ -689,6 +694,7 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 
 	if !reject {
 		r.Vote = m.From
+		r.electionElapsed = 0
 	}
 
 	r.msgs = append(r.msgs, pb.Message{
@@ -813,12 +819,13 @@ func (r *Raft) sendSnapshot(to uint64) {
 }
 
 func (r *Raft) alreadySendSnapshot(to uint64) bool {
-	for _, msg := range r.msgs {
-		if msg.MsgType == pb.MessageType_MsgSnapshot && msg.To == to {
-			return true
-		}
+	if lastSent, ok := r.snapSendRecord[to]; ok && !lastSent.Before(time.Now()) {
+		//log.Infof("%v try to send snapshot to %v, declined by recent sent snapshot, next available time is %v", r.id, to, lastSent)
+		return true
+	} else {
+		r.snapSendRecord[to] = time.Now().Add(2 * time.Second)
+		return false
 	}
-	return false
 }
 
 func (r *Raft) handleSnapshot(m pb.Message) {
