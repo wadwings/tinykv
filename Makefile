@@ -9,7 +9,8 @@ endif
 
 GO                  := GO111MODULE=on go
 GOBUILD             := $(GO) build $(BUILD_FLAG) -tags codes
-GOTEST              := $(GO) test -v --count=1 --parallel=1 -p=1 -timeout 3600s
+GOTEST              := $(GO) test -v --count=1 --parallel=1 -p=1
+TEST_CLEAN          := rm -rf /var/folders/kf/njpfcjtd2b7grp07frm_njr80000gn/T/test-raftstore*
 
 TEST_LDFLAGS        := ""
 
@@ -51,7 +52,7 @@ format:
 	@gofmt -s -w `find . -name '*.go' -type f ! -path '*/_tools/*' -print`
 
 project1:
-	$(GOTEST) ./kv/server -run 1 
+	$(GOTEST) ./kv/server -run 1
 
 project2: project2a project2b project2c
 
@@ -68,10 +69,30 @@ project2ac:
 	$(GOTEST) ./raft -run 2AC
 
 project2b:
-	$(GOTEST) ./kv/test_raftstore -run 2B
+	$(TEST_CLEAN)
+	$(GOTEST) ./kv/test_raftstore -run ^TestBasic2B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestConcurrent2B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestUnreliable2B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestOnePartition2B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestManyPartitionsOneClient2B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestManyPartitionsManyClients2B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestPersistOneClient2B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestPersistConcurrent2B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestPersistConcurrentUnreliable2B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestPersistPartition2B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestPersistPartitionUnreliable2B$ || true
+	$(TEST_CLEAN)
 
 project2c:
-	$(GOTEST) ./raft ./kv/test_raftstore -run 2C
+	$(TEST_CLEAN)
+	$(GOTEST) ./raft -run 2C || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestOneSnapshot2C$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestSnapshotRecover2C$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestSnapshotRecoverManyClients2C$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestSnapshotUnreliable2C$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestSnapshotUnreliableRecover2C$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestSnapshotUnreliableRecoverConcurrentPartition2C$ || true
+	$(TEST_CLEAN)
 
 project3: project3a project3b project3c
 
@@ -79,7 +100,23 @@ project3a:
 	$(GOTEST) ./raft -run 3A
 
 project3b:
-	$(GOTEST) ./kv/test_raftstore -run 3B
+	$(TEST_CLEAN)
+	$(GOTEST) ./kv/test_raftstore -run ^TestTransferLeader3B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestBasicConfChange3B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestConfChangeRecover3B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestConfChangeRecoverManyClients3B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestConfChangeUnreliable3B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestConfChangeUnreliableRecover3B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestConfChangeSnapshotUnreliableRecover3B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestConfChangeSnapshotUnreliableRecoverConcurrentPartition3B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestOneSplit3B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestSplitRecover3B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestSplitRecoverManyClients3B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestSplitUnreliable3B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestSplitUnreliableRecover3B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestSplitConfChangeSnapshotUnreliableRecover3B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestSplitConfChangeSnapshotUnreliableRecoverConcurrentPartition3B$ || true
+	$(TEST_CLEAN)
 
 project3c:
 	$(GOTEST) ./scheduler/server ./scheduler/server/schedulers -check.f="3C"

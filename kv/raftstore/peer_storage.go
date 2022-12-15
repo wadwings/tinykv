@@ -116,6 +116,7 @@ func (ps *PeerStorage) Entries(low, high uint64) ([]eraftpb.Entry, error) {
 		}
 		// May meet gap or has been compacted.
 		if entry.Index != nextIndex {
+			log.Warnf("%v log gap between %v and %v", ps.Tag, entry.Index, nextIndex)
 			break
 		}
 		nextIndex++
@@ -125,6 +126,7 @@ func (ps *PeerStorage) Entries(low, high uint64) ([]eraftpb.Entry, error) {
 	if len(buf) == int(high-low) {
 		return buf, nil
 	}
+	log.Infof("%v storage entries number don't match. lo index %d, hi index %d, fetch entries %+v", ps.Tag, low, high, buf)
 	// Here means we don't fetch enough entries.
 	return nil, raft.ErrUnavailable
 }
@@ -348,8 +350,10 @@ func (ps *PeerStorage) Apply(committedEntries []eraftpb.Entry, kvWB *engine_util
 			switch adminRequest.CmdType {
 			case raft_cmdpb.AdminCmdType_CompactLog:
 				log.Infof("%v Compact Log %+v, entry index: %v", ps.Tag, adminRequest.CompactLog, entry.Index)
-				ps.applyState.TruncatedState.Index = adminRequest.CompactLog.CompactIndex
-				ps.applyState.TruncatedState.Term = adminRequest.CompactLog.CompactTerm
+				if ps.applyState.TruncatedState.Index < adminRequest.CompactLog.CompactIndex {
+					ps.applyState.TruncatedState.Index = adminRequest.CompactLog.CompactIndex
+					ps.applyState.TruncatedState.Term = adminRequest.CompactLog.CompactTerm
+				}
 			}
 			continue
 		}
@@ -391,9 +395,9 @@ func (ps *PeerStorage) SaveState(raftWB *engine_util.WriteBatch, kvWB *engine_ut
 // Apply the peer with given snapshot
 func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_util.WriteBatch, raftWB *engine_util.WriteBatch) (*ApplySnapResult, error) {
 	log.Infof("%v begin to apply snapshot", ps.Tag)
+	ps.validateSnap(snapshot)
 	prevRegion := ps.Region()
 	snapData := new(rspb.RaftSnapshotData)
-
 	metaData := snapshot.Metadata
 	if err := snapData.Unmarshal(snapshot.Data); err != nil {
 		return nil, err
@@ -401,6 +405,8 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	if snapData.Region != nil {
 		ps.region = snapData.Region
 	}
+
+	ps.Append([]eraftpb.Entry{{Index: metaData.Index, Term: metaData.Term}}, raftWB)
 	ps.raftState.LastIndex = max(ps.raftState.LastIndex, metaData.Index)
 	ps.raftState.LastTerm = max(ps.raftState.LastTerm, metaData.Term)
 	ps.applyState.AppliedIndex = max(ps.applyState.AppliedIndex, metaData.Index)
@@ -508,4 +514,13 @@ func max(a, b uint64) uint64 {
 		return a
 	}
 	return b
+}
+
+func (ps *PeerStorage) setTruncatedState(index, term uint64) {
+	if index > ps.applyState.TruncatedState.Index {
+		ps.applyState.TruncatedState = &rspb.RaftTruncatedState{
+			Index: index,
+			Term:  term,
+		}
+	}
 }

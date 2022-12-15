@@ -19,6 +19,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"math/rand"
+	"time"
 )
 
 // None is a placeholder node ID used when there is no leader.
@@ -166,6 +167,10 @@ type Raft struct {
 	// value.
 	// (Used in 3A conf change)
 	PendingConfIndex uint64
+
+	snapSendRecord map[uint64]time.Time
+
+	//snapElapsed time.Time
 }
 
 // newRaft return a raft peer with the given config
@@ -193,11 +198,13 @@ func newRaft(c *Config) *Raft {
 		return nil
 	}
 	return &Raft{
-		id:                 c.ID,
-		State:              StateFollower,
-		electionBaseline:   c.ElectionTick,
-		electionTimeout:    randomizedTimeout(c.ElectionTick),
-		heartbeatTimeout:   c.HeartbeatTick,
+		id:               c.ID,
+		State:            StateFollower,
+		electionBaseline: c.ElectionTick,
+		electionTimeout:  randomizedTimeout(c.ElectionTick),
+		heartbeatTimeout: c.HeartbeatTick,
+		snapSendRecord:   map[uint64]time.Time{},
+		//snapElapsed:        time.Now(),
 		leaderLeaseElapsed: 0,
 		Term:               hardState.Term,
 		Prs:                prs,
@@ -251,7 +258,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 
 func (r *Raft) deduplicateAppend(to uint64) {
 	for i, msg := range r.msgs {
-		if msg.To == to && (msg.MsgType == pb.MessageType_MsgAppend || msg.MsgType == pb.MessageType_MsgSnapshot) {
+		if msg.To == to && msg.MsgType == pb.MessageType_MsgAppend {
 			r.msgs = append(r.msgs[:i], r.msgs[i+1:]...)
 			break
 		}
@@ -360,6 +367,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	}
 	//log.Infof("%v now is Follower!", r.id)
 	r.State = StateFollower
+	r.electionElapsed = 0
 	r.Term = term
 	r.Lead = lead
 	r.Vote = lead
@@ -509,6 +517,11 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		//TODO I doubt it
 		//follower Raftlog is newer than current appendRequest
 		//kept refusing append will result in entirely rewritten
+		reject = true
+	}
+	if len(m.Entries) != 0 && m.Entries[len(m.Entries)-1].Index < r.RaftLog.committed {
+		//some network delay will cause that happen, we shall refuse this kind of append
+		//cause it will break commit
 		reject = true
 	}
 	if !reject {
@@ -689,6 +702,7 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 
 	if !reject {
 		r.Vote = m.From
+		r.electionElapsed = 0
 	}
 
 	r.msgs = append(r.msgs, pb.Message{
@@ -813,12 +827,17 @@ func (r *Raft) sendSnapshot(to uint64) {
 }
 
 func (r *Raft) alreadySendSnapshot(to uint64) bool {
-	for _, msg := range r.msgs {
-		if msg.MsgType == pb.MessageType_MsgSnapshot && msg.To == to {
-			return true
-		}
+	//if !r.snapElapsed.Before(time.Now()) {
+	//	return true
+	//}
+	if lastSent, ok := r.snapSendRecord[to]; ok && !lastSent.Before(time.Now()) {
+		//log.Infof("%v try to send snapshot to %v, declined by recent sent snapshot, next available time is %v", r.id, to, lastSent)
+		return true
+	} else {
+		r.snapSendRecord[to] = time.Now().Add(2 * time.Second)
+		//r.snapElapsed = time.Now().Add(1 * time.Second)
+		return false
 	}
-	return false
 }
 
 func (r *Raft) handleSnapshot(m pb.Message) {

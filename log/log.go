@@ -167,9 +167,9 @@ func (l *Logger) log(t LogType, v ...interface{}) {
 }
 
 func (l *Logger) logf(t LogType, format string, v ...interface{}) {
-	if l.level|LogLevel(t) != l.level {
-		return
-	}
+	//if l.level|LogLevel(t) != l.level {
+	//	return
+	//}
 
 	logStr, logColor := LogTypeToString(t)
 	var s string
