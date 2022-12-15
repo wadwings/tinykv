@@ -169,6 +169,8 @@ type Raft struct {
 	PendingConfIndex uint64
 
 	snapSendRecord map[uint64]time.Time
+
+	//snapElapsed time.Time
 }
 
 // newRaft return a raft peer with the given config
@@ -196,12 +198,13 @@ func newRaft(c *Config) *Raft {
 		return nil
 	}
 	return &Raft{
-		id:                 c.ID,
-		State:              StateFollower,
-		electionBaseline:   c.ElectionTick,
-		electionTimeout:    randomizedTimeout(c.ElectionTick),
-		heartbeatTimeout:   c.HeartbeatTick,
-		snapSendRecord:     map[uint64]time.Time{},
+		id:               c.ID,
+		State:            StateFollower,
+		electionBaseline: c.ElectionTick,
+		electionTimeout:  randomizedTimeout(c.ElectionTick),
+		heartbeatTimeout: c.HeartbeatTick,
+		snapSendRecord:   map[uint64]time.Time{},
+		//snapElapsed:        time.Now(),
 		leaderLeaseElapsed: 0,
 		Term:               hardState.Term,
 		Prs:                prs,
@@ -214,7 +217,7 @@ func newRaft(c *Config) *Raft {
 }
 
 func randomizedTimeout(tz int) int {
-	return int(float32(tz) * (rand.Float32() + 1) * 2)
+	return int(float32(tz) * (rand.Float32() + 1))
 }
 
 // sendAppend sends an ap1pend RPC with new entries (if any) and the
@@ -255,7 +258,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 
 func (r *Raft) deduplicateAppend(to uint64) {
 	for i, msg := range r.msgs {
-		if msg.To == to && (msg.MsgType == pb.MessageType_MsgAppend || msg.MsgType == pb.MessageType_MsgSnapshot) {
+		if msg.To == to && msg.MsgType == pb.MessageType_MsgAppend {
 			r.msgs = append(r.msgs[:i], r.msgs[i+1:]...)
 			break
 		}
@@ -514,6 +517,11 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		//TODO I doubt it
 		//follower Raftlog is newer than current appendRequest
 		//kept refusing append will result in entirely rewritten
+		reject = true
+	}
+	if len(m.Entries) != 0 && m.Entries[len(m.Entries)-1].Index < r.RaftLog.committed {
+		//some network delay will cause that happen, we shall refuse this kind of append
+		//cause it will break commit
 		reject = true
 	}
 	if !reject {
@@ -819,11 +827,15 @@ func (r *Raft) sendSnapshot(to uint64) {
 }
 
 func (r *Raft) alreadySendSnapshot(to uint64) bool {
+	//if !r.snapElapsed.Before(time.Now()) {
+	//	return true
+	//}
 	if lastSent, ok := r.snapSendRecord[to]; ok && !lastSent.Before(time.Now()) {
 		//log.Infof("%v try to send snapshot to %v, declined by recent sent snapshot, next available time is %v", r.id, to, lastSent)
 		return true
 	} else {
 		r.snapSendRecord[to] = time.Now().Add(2 * time.Second)
+		//r.snapElapsed = time.Now().Add(1 * time.Second)
 		return false
 	}
 }

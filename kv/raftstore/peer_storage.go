@@ -116,6 +116,7 @@ func (ps *PeerStorage) Entries(low, high uint64) ([]eraftpb.Entry, error) {
 		}
 		// May meet gap or has been compacted.
 		if entry.Index != nextIndex {
+			log.Warnf("%v log gap between %v and %v", ps.Tag, entry.Index, nextIndex)
 			break
 		}
 		nextIndex++
@@ -125,6 +126,7 @@ func (ps *PeerStorage) Entries(low, high uint64) ([]eraftpb.Entry, error) {
 	if len(buf) == int(high-low) {
 		return buf, nil
 	}
+	log.Infof("%v storage entries number don't match. lo index %d, hi index %d, fetch entries %+v", ps.Tag, low, high, buf)
 	// Here means we don't fetch enough entries.
 	return nil, raft.ErrUnavailable
 }
@@ -348,8 +350,10 @@ func (ps *PeerStorage) Apply(committedEntries []eraftpb.Entry, kvWB *engine_util
 			switch adminRequest.CmdType {
 			case raft_cmdpb.AdminCmdType_CompactLog:
 				log.Infof("%v Compact Log %+v, entry index: %v", ps.Tag, adminRequest.CompactLog, entry.Index)
-				ps.applyState.TruncatedState.Index = adminRequest.CompactLog.CompactIndex
-				ps.applyState.TruncatedState.Term = adminRequest.CompactLog.CompactTerm
+				if ps.applyState.TruncatedState.Index < adminRequest.CompactLog.CompactIndex {
+					ps.applyState.TruncatedState.Index = adminRequest.CompactLog.CompactIndex
+					ps.applyState.TruncatedState.Term = adminRequest.CompactLog.CompactTerm
+				}
 			}
 			continue
 		}
@@ -510,4 +514,13 @@ func max(a, b uint64) uint64 {
 		return a
 	}
 	return b
+}
+
+func (ps *PeerStorage) setTruncatedState(index, term uint64) {
+	if index > ps.applyState.TruncatedState.Index {
+		ps.applyState.TruncatedState = &rspb.RaftTruncatedState{
+			Index: index,
+			Term:  term,
+		}
+	}
 }
